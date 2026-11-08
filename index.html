@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Eltrolyze – Syntax Checker &amp; Auto-Fixer</title>
+  <title>Eltrolyze - Syntax Checker &amp; Auto-Fixer</title>
   <meta name="description" content="A local, rule-based JavaScript syntax checker and automatic bug fixer. Runs 100% in your browser." />
 
   <link rel="icon" type="image/png" href="favicon.png">
@@ -593,11 +593,11 @@ function collectDeclared(masked) {
   const add = (s) => { const w = s.match(/[A-Za-z_$][\w$]*/g); if (w) for (const x of w) set.add(x); };
   for (const m of masked.matchAll(/\b(?:const|let|var)\s+([^=;\n]+?)\s*(?==|;|\n|$|\b(?:of|in)\b)/g)) add(m[1]);
   for (const m of masked.matchAll(/\b(?:const|let|var)\s+([{\[][^=;]*?[}\]])\s*=/g)) add(m[1]);
-  for (const m of masked.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\(([^)]*)\)/g)) { if (m[1]) set.add(m[1]); add(m[2]); }
+  for (const m of masked.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\(([^(){};]*)\)/g)) { if (m[1]) set.add(m[1]); add(m[2]); }
   for (const m of masked.matchAll(/\bclass\s+([A-Za-z_$][\w$]*)/g)) set.add(m[1]);
-  for (const m of masked.matchAll(/\(([^()]*)\)\s*=>/g)) add(m[1]);
+  for (const m of masked.matchAll(/\(([^(){};]*)\)\s*=>/g)) add(m[1]);
   for (const m of masked.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=>/g)) set.add(m[1]);
-  for (const m of masked.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*\{/g)) {
+  for (const m of masked.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(([^(){};]*)\)\s*\{/g)) {
     if (!/^(?:if|for|while|switch|with|function|return)$/.test(m[1])) { set.add(m[1]); add(m[2]); }
   }
   for (const m of masked.matchAll(/\bimport\s+([^;\n]*?)\s+from\b/g)) add(m[1]);
@@ -1587,7 +1587,7 @@ function stageSemicolons(text, log) {
     // a line ending in "}" only needs ';' when it is a complete assignment/declaration
     if (last === '}') {
       if (!s.balanced) continue;
-      if (!/^(?:export\s+)?(?:const|let|var)\b/.test(t) && !/^[\w$.\[\]'"]+\s*=(?![=>])/.test(t)) continue;
+      if (!/^(?:export\s+)?(?:const|let|var)\b/.test(t) && !/^[\w$.\[\]'"]+\s*=(?![=>])/.test(t) && !/^(?:return|throw)\b/.test(t)) continue;
     }
 
     edits.push({ pos: starts[li] + nl.trimEnd().length, text: ';' });
@@ -1952,20 +1952,29 @@ if (typeof document !== 'undefined') {
   };
 
   const EXAMPLE = [
-    '// Try me: this snippet is full of beginner bugs',
+    '// Try me: this snippet has beginner bugs',
+    '',
     'function greet(name {',
-    '  print("Hello, " + name);',
-    '  let x = 10',
-    '  if (x = 5) {',
-    '    console.log("x is five")',
-    '  }',
-    '  const items = [1, 2, 3',
-    '  const total = 0',
-    '  for (let i = 0, i < items.lenght, i++) {',
-    '    total += items[i]',
-    '  }',
-    '  const data = await fetch("/api")',
-    '  retrun x',
+    '    print("Hello, " + name);',
+    '',
+    '    let x = 10',
+    '',
+    '    if (x = 5) {',
+    '        console.log("x is five")',
+    '    }',
+    '',
+    '    const items = [1, 2, 3',
+    '    const total = 0',
+    '',
+    '    for (let i = 0, i < items.lenght, i++) {',
+    '        total += items[i]',
+    '    }',
+    '',
+    '    const response = await fetch("/api")',
+    '    const data = await response.json()',
+    '',
+    '    retrun { x, total, data }',
+    '}',
     ''
   ].join('\n');
 
