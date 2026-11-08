@@ -1,0 +1,2306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Code Syntax Checker &amp; Auto-Fixer</title>
+  <meta name="description" content="A local, rule-based JavaScript syntax checker and automatic bug fixer. Runs 100% in your browser." />
+
+  <link rel="icon" type="image/png" href="Favicon.png">
+
+  <!-- Tailwind CSS via CDN (the only external resource; no AI, no APIs, no backend) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    /* Small custom touches on top of Tailwind */
+    html, body { background: #020617; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    textarea { tab-size: 2; }
+    .scroll-thin::-webkit-scrollbar { width: 10px; height: 10px; }
+    .scroll-thin::-webkit-scrollbar-thumb { background: #334155; border-radius: 8px; }
+    .scroll-thin::-webkit-scrollbar-track { background: transparent; }
+    .code-line { display: flex; white-space: pre; tab-size: 2; }
+    .code-line .gutter { flex: none; width: 3rem; padding-right: .75rem; text-align: right; color: #475569; user-select: none; }
+    .code-line.changed { background: rgba(16, 185, 129, .10); box-shadow: inset 2px 0 0 #34d399; }
+    .code-line.errline { background: rgba(248, 113, 113, .10); box-shadow: inset 2px 0 0 #f87171; }
+
+    /* Syntax highlighting */
+    .t-kw  { color: #c084fc; }                       /* keywords  – purple */
+    .t-str { color: #4ade80; }                       /* strings   – green  */
+    .t-fn  { color: #60a5fa; }                       /* functions – blue   */
+    .t-err { color: #f87171; text-decoration: underline wavy #f87171; text-underline-offset: 3px; } /* errors – red */
+    .t-com { color: #64748b; font-style: italic; }   /* comments */
+    .t-num { color: #fbbf24; }                       /* numbers */
+    .t-lit { color: #fb923c; }                       /* true / false / null */
+    .t-rx  { color: #f472b6; }                       /* regex literals */
+    .dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 2px; vertical-align: middle; margin-right: .25rem; }
+
+    /* Drag & drop */
+    #drop-overlay { display: none; }
+    #left-panel.dragging #drop-overlay { display: flex; }
+    #left-panel.dragging { border-color: #34d399; }
+  </style>
+</head>
+
+<body class="min-h-screen text-slate-200 antialiased">
+  <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+
+    <!-- ===== Header + actions ===== -->
+    <header class="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+      <div>
+        <h1 class="text-2xl font-bold tracking-tight text-white">
+          <span class="text-emerald-400">&lt;/&gt;</span> Code Syntax Checker &amp; Auto-Fixer
+        </h1>
+        <p class="mt-1 text-sm text-slate-400">
+          Rule-based JavaScript bug fixer. Runs entirely in your browser &mdash; nothing is uploaded.
+        </p>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <button id="btn-fix" type="button"
+          class="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 shadow hover:bg-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-300">
+          Analyze &amp; Fix Code
+        </button>
+        <button id="btn-open" type="button"
+          class="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-100 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-500">
+          Open file
+        </button>
+        <button id="btn-download" type="button" disabled
+          class="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-100 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-500 disabled:cursor-not-allowed disabled:opacity-40">
+          Download fixed file
+        </button>
+        <button id="btn-copy" type="button" disabled
+          class="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-100 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-500 disabled:cursor-not-allowed disabled:opacity-40">
+          Copy Fixed Code
+        </button>
+        <button id="btn-clear" type="button"
+          class="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-semibold text-slate-300 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-500">
+          Clear
+        </button>
+        <button id="btn-privacy-top" type="button"
+          class="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-semibold text-slate-300 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-500">
+          Privacy
+        </button>
+        <button id="btn-example" type="button"
+          class="rounded-lg px-3 py-2 text-sm text-slate-400 underline-offset-4 hover:text-slate-200 hover:underline">
+          Load buggy example
+        </button>
+        <label class="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-sm text-slate-400 hover:text-slate-200" title="Re-indent the code, trim trailing spaces and collapse extra blank lines">
+          <input id="opt-format" type="checkbox" class="h-4 w-4 accent-emerald-500" />
+          Tidy formatting
+        </label>
+      </div>
+      <input id="file-input" type="file" class="hidden"
+        accept=".js,.mjs,.cjs,.jsx,.ts,.tsx,.html,.htm,.txt,.md,text/javascript,text/plain,text/html" />
+    </header>
+
+    <!-- ===== Two-column dashboard (stacked on mobile) ===== -->
+    <main class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+
+      <!-- LEFT: input (also a drag & drop target) -->
+      <section id="left-panel" class="relative flex min-h-[28rem] flex-col rounded-xl border border-slate-800 bg-slate-900/60">
+        <div class="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+          <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-300">Your code</h2>
+          <span id="input-meta" class="text-xs text-slate-500">0 lines &middot; 0 chars</span>
+        </div>
+
+        <!-- Upload strip -->
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-dashed border-slate-800 px-4 py-2 text-xs text-slate-500">
+          <span>Drag &amp; drop a <span class="mono text-slate-400">.js</span> file anywhere here, or
+            <button id="btn-open-inline" type="button" class="text-emerald-400 underline underline-offset-2 hover:text-emerald-300">browse</button>.
+          </span>
+          <span id="file-chip" class="mono hidden items-center gap-2 rounded-full border border-slate-700 bg-slate-800 px-2.5 py-0.5 text-slate-300">
+            <span id="file-chip-name"></span>
+            <span id="file-chip-size" class="text-slate-500"></span>
+            <button id="file-chip-x" type="button" aria-label="Forget file name" class="text-slate-500 hover:text-slate-200">&times;</button>
+          </span>
+        </div>
+
+        <textarea id="input" spellcheck="false" autocomplete="off" autocapitalize="off"
+          placeholder="Paste messy or buggy JavaScript here (also HTML pages with <script>, Markdown code blocks or code with line numbers), or drop a .js file. Then press “Analyze &amp; Fix Code” (Ctrl/Cmd + Enter)…"
+          class="mono scroll-thin h-full min-h-[22rem] w-full flex-1 resize-y rounded-b-xl bg-transparent p-4 text-sm leading-6 text-slate-100 placeholder-slate-600 focus:outline-none"></textarea>
+
+        <div id="drop-overlay"
+          class="pointer-events-none absolute inset-0 z-10 items-center justify-center rounded-xl border-2 border-dashed border-emerald-400 bg-slate-950/85 text-center">
+          <div>
+            <div class="text-lg font-semibold text-emerald-300">Drop your file to load it</div>
+            <div class="mt-1 text-xs text-slate-400">.js, .mjs, .cjs, .jsx, .ts, .tsx, .html or .txt &middot; max 2 MB &middot; stays in your browser</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT: fixed code + diagnostics -->
+      <section class="flex flex-col gap-6">
+
+        <!-- Code preview with syntax highlighting -->
+        <div class="flex flex-col rounded-xl border border-slate-800 bg-slate-900/60">
+          <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
+            <div class="flex gap-1 rounded-lg bg-slate-950/60 p-1" role="tablist" aria-label="Code view">
+              <button id="tab-fixed" type="button" role="tab" aria-selected="true"
+                class="rounded-md px-3 py-1 text-xs font-semibold uppercase tracking-wider">Fixed code</button>
+              <button id="tab-original" type="button" role="tab" aria-selected="false"
+                class="rounded-md px-3 py-1 text-xs font-semibold uppercase tracking-wider">Original (errors)</button>
+            </div>
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+              <span><span class="dot bg-purple-400"></span>keyword</span>
+              <span><span class="dot bg-green-400"></span>string</span>
+              <span><span class="dot bg-blue-400"></span>function</span>
+              <span><span class="dot bg-red-400"></span>error</span>
+              <span><span class="dot bg-emerald-400/60"></span>changed line</span>
+            </div>
+          </div>
+          <div id="output-code" class="mono scroll-thin max-h-[28rem] min-h-[10rem] overflow-auto p-3 text-sm leading-6 text-slate-100">
+            <p class="p-1 text-slate-600">The corrected code will appear here.</p>
+          </div>
+        </div>
+
+        <!-- Error explanation / log -->
+        <div class="flex flex-col rounded-xl border border-slate-800 bg-slate-900/60">
+          <div class="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-300">Diagnostics</h2>
+            <span id="log-count" class="text-xs text-slate-500"></span>
+          </div>
+          <div id="status" class="hidden flex-col gap-2 px-4 pt-3"></div>
+          <div id="chips" class="flex flex-wrap gap-2 px-4 pt-3 empty:hidden"></div>
+          <ul id="log" class="scroll-thin max-h-72 space-y-2 overflow-auto p-4 text-sm">
+            <li class="text-slate-600">Reported bugs and the fixes applied to them will be listed here.</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer class="mt-8 text-center text-xs text-slate-600">
+      Eltrolyze: Heuristic, rule-based fixes verified with the browser&rsquo;s own JavaScript parser &mdash; always review the output before using it. Version &bull; 1.0.0 Vilto.
+      <span class="mx-1">&middot;</span>
+      <button id="btn-privacy-foot" type="button" class="underline underline-offset-2 hover:text-slate-300">Privacy Policy &amp; Settings</button>
+    </footer>
+  </div>
+
+  <!-- ===== Privacy Policy & Settings modal ===== -->
+  <div id="privacy-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/70 p-4"
+       role="dialog" aria-modal="true" aria-labelledby="privacy-title">
+    <div id="privacy-card" class="scroll-thin max-h-[90vh] w-full max-w-2xl overflow-auto rounded-xl border border-slate-700 bg-slate-900 shadow-2xl">
+      <div class="sticky top-0 flex items-center justify-between border-b border-slate-800 bg-slate-900 px-5 py-4">
+        <h2 id="privacy-title" class="text-lg font-bold text-white">Privacy Policy &amp; Settings</h2>
+        <button id="privacy-close" type="button" aria-label="Close"
+          class="rounded-md px-2 py-1 text-xl leading-none text-slate-400 hover:bg-slate-800 hover:text-white focus:outline-none focus:ring-2 focus:ring-slate-500">&times;</button>
+      </div>
+
+      <div class="space-y-6 px-5 py-5 text-sm leading-6 text-slate-300">
+
+        <!-- Settings -->
+        <section>
+          <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-emerald-400">Your settings</h3>
+          <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+            <input id="opt-save" type="checkbox" class="mt-1 h-4 w-4 flex-none accent-emerald-500" />
+            <span>
+              <span class="block font-semibold text-slate-100">Remember my code on this device</span>
+              <span class="block text-slate-400">Off by default. When on, the code in the editor is saved in this browser&rsquo;s local storage so it is still there next time. It is never sent anywhere.</span>
+            </span>
+          </label>
+          <div class="mt-3 flex flex-wrap items-center gap-3">
+            <button id="btn-delete-data" type="button"
+              class="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/20 focus:outline-none focus:ring-2 focus:ring-red-400">
+              Delete all stored data
+            </button>
+            <span id="storage-info" class="text-xs text-slate-500"></span>
+          </div>
+          <p id="privacy-msg" class="mt-2 hidden text-xs text-emerald-300" role="status"></p>
+        </section>
+
+        <!-- Policy -->
+        <section class="space-y-4">
+          <h3 class="text-xs font-semibold uppercase tracking-wider text-emerald-400">Privacy policy</h3>
+          <p class="text-xs text-slate-500">Last updated: November 8, 2026</p>
+
+          <div>
+            <h4 class="font-semibold text-slate-100">1. Short version</h4>
+            <p>This tool runs entirely in your browser. The code you paste or the files you open are processed on your device and are not uploaded, stored on a server, or shared with anyone.</p>
+          </div>
+          <div>
+            <h4 class="font-semibold text-slate-100">2. What we collect</h4>
+            <p>Nothing. There is no account, no analytics, no tracking pixels, no advertising and no cookies. We do not have a backend that could receive your data.</p>
+          </div>
+          <div>
+            <h4 class="font-semibold text-slate-100">3. Files and code</h4>
+            <p>Files you drag in or open are read locally with your browser&rsquo;s File API. The fixed file you download is generated on your device. Nothing leaves it. To verify the result, your browser&rsquo;s built-in JavaScript parser is asked whether the code is syntactically valid. This only <em>parses</em> the text; your code is never executed.</p>
+          </div>
+          <div>
+            <h4 class="font-semibold text-slate-100">4. Local storage</h4>
+            <p>The only data kept is what you opt into above: your code (if &ldquo;Remember my code&rdquo; is on) and that setting itself. It lives only in this browser and you can delete it at any time with the button above or by clearing your site data.</p>
+          </div>
+          <div>
+            <h4 class="font-semibold text-slate-100">5. Third-party resources</h4>
+            <p>The page loads its styling from the Tailwind CSS CDN (<span class="mono text-slate-400">cdn.tailwindcss.com</span>). Like any web resource, that request exposes your IP address and browser details to the CDN provider. Your code is never part of that request. To avoid it entirely, self-host the stylesheet.</p>
+          </div>
+          <div>
+            <h4 class="font-semibold text-slate-100">6. Your control</h4>
+            <p>You decide what is remembered. Turning the setting off, deleting stored data or clearing site data removes everything this tool has saved.</p>
+          </div>
+          <div>
+            <h4 class="font-semibold text-slate-100">7. Changes</h4>
+            <p>If this policy changes, the updated version and date will appear here.</p>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+<script>
+'use strict';
+/* =========================================================================
+ *  CODE FIXER ENGINE  (pure functions, no DOM access, no network)
+ *
+ *  Every stage works on the whole text and logs what it changed. Each stage
+ *  first "classifies" every character as code / string / comment / regex so
+ *  that rules never touch the inside of strings or comments.
+ *
+ *  Pipeline:
+ *    0. normalize   Markdown fences, line-number gutters, smart quotes, invisible
+ *                   characters, HTML entities, "# comments"
+ *    1. strings     unterminated strings
+ *    2. lang        Python / Java / C# / PHP habits  ->  JavaScript
+ *    3. keywords    misspelled keywords (fuzzy), typed declarations, def/fn
+ *    4. typos       known misspellings, console casing, print() -> console.log()
+ *    5. operators   =< , = > , -> , .length()
+ *    6. for         for (let i = 0, i < n, i++)
+ *    7. conditions  missing parentheses, assignment instead of comparison
+ *    8. brackets    unmatched ( ) [ ] { }
+ *    9. commas      missing commas in multi-line objects / arrays (only if broken)
+ *   10. names       fuzzy typo repair of identifiers + built-in properties
+ *   11. async       `await` inside a non-async function
+ *   12. dupes       duplicate let / const declarations in one scope
+ *   13. const       const that is reassigned -> let
+ *   14. semicolons  missing semicolons
+ *   15. format      optional re-indentation
+ *
+ *  Safety net: the browser's own JS parser (parse only, never executes) is
+ *  asked after every stage. A stage that would turn VALID code into INVALID
+ *  code is rolled back automatically.
+ *  Line numbers in the log always refer to the ORIGINAL input.
+ * ========================================================================= */
+
+const K_CODE = 0, K_STR = 1, K_COM = 2, K_RX = 3;
+
+const KEYWORDS = new Set(('async await break case catch class const continue debugger default delete do else ' +
+  'export extends finally for function if import in instanceof let new of return static super switch this ' +
+  'throw try typeof var void while with yield').split(' '));
+const LITERALS = new Set(['true', 'false', 'null', 'undefined', 'NaN', 'Infinity']);
+const RESERVED = new Set([...KEYWORDS, ...LITERALS, ...('enum implements interface package private protected public ' +
+  'get set from as type declare abstract readonly override namespace constructor prototype arguments module exports ' +
+  'require globalThis').split(' ')]);
+
+const GLOBALS = new Set(('Object Array String Number Boolean Symbol BigInt Function Math JSON Date RegExp Error TypeError ' +
+  'RangeError SyntaxError ReferenceError EvalError URIError AggregateError Promise Map Set WeakMap WeakSet WeakRef Proxy ' +
+  'Reflect Intl ArrayBuffer SharedArrayBuffer DataView Atomics Int8Array Uint8Array Uint8ClampedArray Int16Array Uint16Array ' +
+  'Int32Array Uint32Array Float32Array Float64Array BigInt64Array BigUint64Array globalThis window document console navigator ' +
+  'location history localStorage sessionStorage indexedDB fetch Request Response Headers FormData URL URLSearchParams Blob File ' +
+  'FileReader XMLHttpRequest WebSocket Worker alert confirm prompt setTimeout setInterval clearTimeout clearInterval ' +
+  'requestAnimationFrame cancelAnimationFrame queueMicrotask structuredClone atob btoa encodeURIComponent decodeURIComponent ' +
+  'encodeURI decodeURI escape unescape parseInt parseFloat isNaN isFinite eval require module exports process Buffer ' +
+  '__dirname __filename global performance crypto TextEncoder TextDecoder AbortController Event CustomEvent EventTarget Node ' +
+  'Element HTMLElement MutationObserver IntersectionObserver ResizeObserver Image Audio Option screen self top parent frames ' +
+  'name length status event open close print stop focus blur scroll getComputedStyle matchMedia innerWidth innerHeight ' +
+  'devicePixelRatio customElements Notification caches BroadcastChannel MessageChannel Intl DOMParser Selection').split(' '));
+
+const KNOWN_PROPS = new Set(('length push pop shift unshift slice splice concat join reverse sort indexOf lastIndexOf includes ' +
+  'find findIndex findLast findLastIndex filter map forEach reduce reduceRight some every flat flatMap fill keys values entries ' +
+  'from isArray at copyWithin toSorted toReversed toSpliced charAt charCodeAt codePointAt split substring substr trim trimStart ' +
+  'trimEnd padStart padEnd repeat replace replaceAll match matchAll search startsWith endsWith toLowerCase toUpperCase ' +
+  'toLocaleLowerCase toLocaleUpperCase localeCompare normalize toFixed toPrecision toString toLocaleString valueOf parseInt ' +
+  'parseFloat isInteger isFinite isNaN isSafeInteger floor ceil round random max min abs sqrt pow sign trunc log log2 log10 exp ' +
+  'sin cos tan atan atan2 hypot cbrt assign create defineProperty freeze isFrozen seal fromEntries getPrototypeOf hasOwnProperty ' +
+  'hasOwn getOwnPropertyNames stringify parse then catch finally resolve reject all allSettled race any size clear delete ' +
+  'getElementById getElementsByClassName getElementsByTagName querySelector querySelectorAll createElement createTextNode ' +
+  'appendChild removeChild append prepend remove insertBefore replaceChild cloneNode addEventListener removeEventListener ' +
+  'dispatchEvent classList toggle contains innerHTML innerText textContent outerHTML className setAttribute getAttribute ' +
+  'removeAttribute hasAttribute dataset parentNode parentElement children childNodes firstChild lastChild firstElementChild ' +
+  'lastElementChild nextSibling previousSibling nextElementSibling previousElementSibling closest matches focus blur click ' +
+  'submit preventDefault stopPropagation target currentTarget keyCode ctrlKey shiftKey altKey metaKey clientX clientY ' +
+  'offsetWidth offsetHeight scrollTop scrollLeft scrollIntoView getBoundingClientRect warn error info debug table time ' +
+  'timeEnd group groupEnd assert trace getTime getFullYear getMonth getDate getDay getHours getMinutes getSeconds ' +
+  'getMilliseconds toISOString toDateString toLocaleDateString toLocaleTimeString now setFullYear setMonth setDate setHours ' +
+  'setMinutes setSeconds json text blob headers body prototype constructor call apply bind message stack href pathname hash ' +
+  'reload getItem setItem removeItem test exec lastIndex source flags toJSON style value checked disabled selected ' +
+  'getOwnPropertyDescriptor entries isPrototypeOf propertyIsEnumerable sqrt innerHeight innerWidth').split(' '));
+
+/* ---------- lexical pass ---------- */
+
+/** Scan a template literal starting at its opening backtick; handles nested ${ ... `...` ... }. */
+function scanTemplate(text, i, kinds) {
+  const n = text.length;
+  kinds[i++] = K_STR;
+  while (i < n) {
+    const ch = text[i];
+    if (ch === '\\') { kinds[i] = K_STR; if (i + 1 < n) kinds[i + 1] = K_STR; i += 2; continue; }
+    if (ch === '`') { kinds[i++] = K_STR; return { end: i, closed: true }; }
+    if (ch === '$' && text[i + 1] === '{') {
+      kinds[i] = K_STR; kinds[i + 1] = K_STR; i += 2;
+      let depth = 1;
+      while (i < n && depth > 0) {
+        const c = text[i];
+        if (c === '`') { const r = scanTemplate(text, i, kinds); i = r.end; if (!r.closed) return { end: i, closed: false }; continue; }
+        if (c === '"' || c === "'") {
+          kinds[i++] = K_STR;
+          while (i < n && text[i] !== c && text[i] !== '\n') {
+            if (text[i] === '\\') { kinds[i] = K_STR; i++; }
+            if (i < n) kinds[i++] = K_STR;
+          }
+          if (i < n && text[i] === c) kinds[i++] = K_STR;
+          continue;
+        }
+        if (c === '{') depth++;
+        else if (c === '}') depth--;
+        kinds[i++] = K_STR;
+      }
+      continue;
+    }
+    kinds[i++] = K_STR;
+  }
+  return { end: i, closed: false };
+}
+
+/**
+ * Lexical pass. Returns one "kind" per character plus a list of problems
+ * (unterminated quotes/templates) found while scanning.
+ */
+function classify(text) {
+  const n = text.length;
+  const kinds = new Uint8Array(n);
+  const unterminated = [];      // '...' or "..." strings that hit a newline/EOF
+  const openTemplates = [];     // `...` templates that never close
+  const REGEX_PREV = '(,=:[!&|?{};+-*%<>~^';
+  const REGEX_KW = /(?:^|[^\w$.])(?:return|typeof|case|in|of|delete|void|throw|else|do|yield|await)$/;
+  let lastSig = -1;             // index of the last non-space, non-comment char
+  let i = 0;
+
+  while (i < n) {
+    const c = text[i], d = text[i + 1];
+
+    // line comment
+    if (c === '/' && d === '/') {
+      while (i < n && text[i] !== '\n') kinds[i++] = K_COM;
+      continue;
+    }
+    // block comment (newlines inside are marked as comment too)
+    if (c === '/' && d === '*') {
+      const end = text.indexOf('*/', i + 2);
+      const stop = end === -1 ? n : end + 2;
+      while (i < n && i < stop) kinds[i++] = K_COM;
+      continue;
+    }
+    // '...' and "..." strings (must end on the same line unless escaped)
+    if (c === '"' || c === "'") {
+      const start = i;
+      kinds[i++] = K_STR;
+      let closed = false;
+      while (i < n) {
+        const ch = text[i];
+        if (ch === '\\') { kinds[i] = K_STR; if (i + 1 < n) kinds[i + 1] = K_STR; i += 2; continue; }
+        if (ch === '\n') break;
+        kinds[i++] = K_STR;
+        if (ch === c) { closed = true; break; }
+      }
+      if (!closed) unterminated.push({ quote: c, start, end: Math.min(i, n) });
+      lastSig = Math.min(i, n) - 1;
+      continue;
+    }
+    // template literal (may span lines; ${...} is treated as part of the string)
+    if (c === '`') {
+      const start = i;
+      const r = scanTemplate(text, i, kinds);
+      i = r.end;
+      if (!r.closed) openTemplates.push(start);
+      lastSig = Math.min(i, n) - 1;
+      continue;
+    }
+    // regex literal vs. division: decide from the previous significant token
+    if (c === '/') {
+      const prev = lastSig >= 0 ? text[lastSig] : '';
+      const before = text.slice(Math.max(0, lastSig - 10), lastSig + 1);
+      const allowed = lastSig < 0 ||
+        (kinds[lastSig] === K_CODE && (REGEX_PREV.includes(prev) || REGEX_KW.test(before)));
+      if (allowed) {
+        let j = i + 1, inClass = false, ok = false;
+        while (j < n && text[j] !== '\n') {
+          const ch = text[j];
+          if (ch === '\\') { j += 2; continue; }
+          if (ch === '[') inClass = true;
+          else if (ch === ']') inClass = false;
+          else if (ch === '/' && !inClass) { ok = true; break; }
+          j++;
+        }
+        if (ok) {
+          for (let k = i; k <= j; k++) kinds[k] = K_RX;
+          lastSig = j; i = j + 1;
+          continue;
+        }
+      }
+      kinds[i] = K_CODE; lastSig = i; i++;
+      continue;
+    }
+    if (!/\s/.test(c)) lastSig = i;
+    i++;
+  }
+  return { kinds, unterminated, openTemplates };
+}
+
+/** Text with everything that is not plain code (strings, comments, regex) blanked out. */
+function maskText(text, kinds) {
+  const out = new Array(text.length);
+  for (let i = 0; i < text.length; i++) out[i] = (kinds[i] === K_CODE || text[i] === '\n') ? text[i] : ' ';
+  return out.join('');
+}
+
+/** Text with only the comments blanked out (strings kept). */
+function stripComments(text, kinds) {
+  const out = new Array(text.length);
+  for (let i = 0; i < text.length; i++) out[i] = (kinds[i] === K_COM && text[i] !== '\n') ? ' ' : text[i];
+  return out.join('');
+}
+
+/**
+ * 1-based line number of a character index.
+ * The line-start table is cached per text and searched with a binary search,
+ * so thousands of lookups on a big paste stay fast.
+ */
+let _lsText = null, _ls = [0];
+function lineAt(text, idx) {
+  if (_lsText !== text) {
+    _ls = [0];
+    for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) _ls.push(i + 1);
+    _lsText = text;
+  }
+  let lo = 0, hi = _ls.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (_ls[mid] <= idx) lo = mid; else hi = mid - 1;
+  }
+  return lo + 1;
+}
+
+/** Index of the ")" matching the "(" at openIdx, or -1. */
+function findClose(s, openIdx) {
+  let depth = 0;
+  for (let i = openIdx; i < s.length; i++) {
+    if (s[i] === '(') depth++;
+    else if (s[i] === ')') { depth--; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+/** Index of the "(" matching the ")" at closeIdx, or -1. */
+function findOpen(s, closeIdx) {
+  let depth = 0;
+  for (let i = closeIdx; i >= 0; i--) {
+    if (s[i] === ')') depth++;
+    else if (s[i] === '(') { depth--; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+/** Apply insert/delete edits ({pos, del?, text?}) in one pass. Stable for equal positions. */
+function applyEdits(text, edits) {
+  const sorted = edits.map((e, seq) => ({ ...e, seq })).sort((a, b) => a.pos - b.pos || a.seq - b.seq);
+  let out = '', last = 0;
+  for (const e of sorted) {
+    if (e.pos < last) continue;                 // overlapping edit: skip
+    out += text.slice(last, e.pos) + (e.text || '');
+    last = e.pos + (e.del || 0);
+  }
+  return out + text.slice(last);
+}
+
+/**
+ * Regex-rewrite helper that only matches inside real code. The regex runs on the
+ * masked text; `fn` returns {text, from?, to?} (range defaults to the match) or null.
+ */
+function rewrite(text, regex, fn) {
+  const { kinds } = classify(text);
+  const masked = maskText(text, kinds);
+  let out = '', last = 0;
+  for (const m of masked.matchAll(regex)) {
+    if (m.index < last) continue;
+    const r = fn(m, masked, text);
+    if (!r) continue;
+    const from = r.from ?? m.index;
+    const to = r.to ?? m.index + m[0].length;
+    if (from < last) continue;
+    out += text.slice(last, from) + r.text;
+    last = to;
+  }
+  return out + text.slice(last);
+}
+
+function clip(s) { return s.length > 50 ? s.slice(0, 47) + '...' : s; }
+
+/* ---------- fuzzy matching helpers ---------- */
+
+/** Optimal-string-alignment distance (counts a swap of two neighbours as ONE edit). Returns 3 for "far". */
+function osa(a, b) {
+  const n = a.length, m = b.length;
+  if (Math.abs(n - m) > 2) return 3;
+  const d = [];
+  for (let i = 0; i <= n; i++) { d[i] = new Array(m + 1); d[i][0] = i; }
+  for (let j = 0; j <= m; j++) d[0][j] = j;
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let v = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) v = Math.min(v, d[i - 2][j - 2] + 1);
+      d[i][j] = v;
+    }
+  }
+  return d[n][m];
+}
+
+/** Is `w` a plausible one-keystroke typo of `c`? (swap, missing/extra/wrong letter; not just a plural "s") */
+function isTypoOf(w, c) {
+  if (!w || !c || w === c) return false;
+  if (w[0].toLowerCase() !== c[0].toLowerCase()) return false;
+  if (Math.abs(w.length - c.length) > 1) return false;
+  if (osa(w, c) !== 1) return false;
+  if (w.length === c.length) {
+    const diff = [];
+    for (let k = 0; k < w.length; k++) if (w[k] !== c[k]) diff.push(k);
+    if (diff.length === 2 && diff[1] === diff[0] + 1 && w[diff[0]] === c[diff[1]] && w[diff[1]] === c[diff[0]]) return c.length >= 4;
+    return c.length >= 5;                                           // single wrong letter
+  }
+  if (w.length > c.length) return c.length >= 4 && (w.slice(0, -1) !== c || w[w.length - 1] === w[w.length - 2]);
+  return c.length >= 4 && c.slice(0, -1) !== w;                     // missing letter (not just a cut-off end)
+}
+
+/** Unique typo candidate among `pool`, or null. */
+function bestTypo(w, pool) {
+  let hit = null;
+  for (const c of pool) {
+    if (isTypoOf(w, c)) { if (hit) return null; hit = c; }
+  }
+  return hit;
+}
+
+/** Looser match for keywords at the start of a statement (the line is already invalid JS there). */
+function closeWord(w, c) {
+  if (w === c) return false;
+  const d = osa(w, c);
+  if (d === 1) return true;
+  return d === 2 && c.length >= 6 && w[0] === c[0];
+}
+
+/* ---------- names declared anywhere in the code (approximation) ---------- */
+function collectDeclared(masked) {
+  const set = new Set();
+  const add = (s) => { const w = s.match(/[A-Za-z_$][\w$]*/g); if (w) for (const x of w) set.add(x); };
+  for (const m of masked.matchAll(/\b(?:const|let|var)\s+([^=;\n]+?)\s*(?==|;|\n|$|\b(?:of|in)\b)/g)) add(m[1]);
+  for (const m of masked.matchAll(/\b(?:const|let|var)\s+([{\[][^=;]*?[}\]])\s*=/g)) add(m[1]);
+  for (const m of masked.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\(([^)]*)\)/g)) { if (m[1]) set.add(m[1]); add(m[2]); }
+  for (const m of masked.matchAll(/\bclass\s+([A-Za-z_$][\w$]*)/g)) set.add(m[1]);
+  for (const m of masked.matchAll(/\(([^()]*)\)\s*=>/g)) add(m[1]);
+  for (const m of masked.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=>/g)) set.add(m[1]);
+  for (const m of masked.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*\{/g)) {
+    if (!/^(?:if|for|while|switch|with|function|return)$/.test(m[1])) { set.add(m[1]); add(m[2]); }
+  }
+  for (const m of masked.matchAll(/\bimport\s+([^;\n]*?)\s+from\b/g)) add(m[1]);
+  for (const m of masked.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=(?![=>])/g)) set.add(m[1]);
+  return set;
+}
+
+/* =========================================================================
+ *  Syntax verification with the browser's own parser (parse only, never run)
+ * ========================================================================= */
+let AsyncFunctionCtor = null;
+try { AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructor; } catch (e) { /* very old browser */ }
+
+/** Turn ES-module syntax into something Function() can parse (only used for the check). */
+function moduleToScript(code) {
+  const { kinds } = classify(code);
+  const masked = maskText(code, kinds);
+  const chars = code.split('');
+  const blank = (from, to) => { for (let i = from; i < to; i++) if (chars[i] !== '\n') chars[i] = ' '; };
+  const run = (re, fn) => { for (const m of masked.matchAll(re)) fn(m); };
+  run(/(^|\n)([ \t]*)import\b(?!\s*[(.])[\s\S]*?\bfrom\b[ \t]*(?:;|(?=\n)|$)/g, (m) => blank(m.index + m[1].length, m.index + m[0].length));
+  run(/(^|\n)([ \t]*)import\b(?!\s*[(.])[ \t]*(?:;|(?=\n)|$)/g, (m) => blank(m.index + m[1].length, m.index + m[0].length));
+  run(/(^|\n)([ \t]*)export\s*\*[^\n;]*;?/g, (m) => blank(m.index + m[1].length, m.index + m[0].length));
+  run(/(^|\n)([ \t]*)export\s*\{[^}]*\}\s*from[^\n;]*;?/g, (m) => blank(m.index + m[1].length, m.index + m[0].length));
+  run(/(^|[^\w$.])export(?:\s+default)?(?![\w$])/g, (m) => blank(m.index + m[1].length, m.index + m[0].length));
+  run(/(?<![\w$])import\.meta(?![\w$])/g, (m) => { for (let i = 0; i < m[0].length; i++) chars[m.index + i] = i === 0 ? '(' : i === 1 ? ')' : ' '; });
+  return chars.join('');
+}
+
+/** { ok: true | false | null, message } — null means "cannot check here" (e.g. CSP blocks eval). */
+function checkSyntax(code) {
+  let msg = '';
+  try { new Function(code); return { ok: true }; }
+  catch (e) { if (e && e.name === 'EvalError') return { ok: null, message: e.message }; msg = (e && e.message) || 'Syntax error'; }
+  if (AsyncFunctionCtor) {
+    try { new AsyncFunctionCtor(code); return { ok: true, note: 'top-level await' }; }
+    catch (e) { if (e && e.name === 'EvalError') return { ok: null }; msg = (e && e.message) || msg; }
+    const mod = moduleToScript(code);
+    if (mod !== code) {
+      try { new AsyncFunctionCtor(mod); return { ok: true, note: 'module' }; }
+      catch (e) { msg = (e && e.message) || msg; }
+    }
+  }
+  return { ok: false, message: msg };
+}
+
+/** Find the lines that contain the first real syntax error (binary search over statement boundaries). */
+function locateError(code) {
+  const lines = code.split('\n');
+  const { kinds } = classify(code);
+  const masked = maskText(code, kinds).split('\n');
+  const ENDRE = /end of (?:input|script|data|file)|Unexpected end|unexpected EOF/i;
+  const bounds = [];
+  let depth = 0;
+  for (let li = 0; li < lines.length; li++) {
+    for (const c of masked[li]) {
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') depth--;
+    }
+    if (depth < 0) return { from: li + 1, to: li + 1, message: 'Unexpected closing bracket' };
+    if (depth === 0 && masked[li].trim()) bounds.push(li);
+  }
+  if (!bounds.length) return null;
+  const failsAt = (b) => {
+    const r = checkSyntax(lines.slice(0, b + 1).join('\n'));
+    return r.ok === false && !ENDRE.test(r.message || '') ? r : null;
+  };
+  let lo = 0, hi = bounds.length - 1, found = -1, foundMsg = '';
+  if (!failsAt(bounds[hi])) return null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const r = failsAt(bounds[mid]);
+    if (r) { found = mid; foundMsg = r.message; hi = mid - 1; } else lo = mid + 1;
+  }
+  if (found < 0) return null;
+  return { from: found > 0 ? bounds[found - 1] + 2 : 1, to: bounds[found] + 1, message: foundMsg };
+}
+
+/** 'js' | 'jsx' | 'ts' — TypeScript and JSX cannot be verified with the plain JavaScript parser. */
+function detectDialect(text) {
+  const { kinds } = classify(text);
+  const m = maskText(text, kinds);
+  if (/(?:\breturn\s*\(?\s*|=>\s*\(?\s*|[=(,]\s*)<[A-Za-z][\w.:-]*(?:\s[^<>]*)?\/?>/.test(m) || /<\/[A-Za-z][\w.]*>/.test(m)) return 'jsx';
+  if (/(?:^|\n)\s*(?:export\s+)?(?:interface|enum|namespace|declare|type)\s+[A-Za-z_$][\w$]*\s*(?:<[^>\n]*>)?\s*(?:=|\{|extends)/.test(m) ||
+      /\b(?:let|const|var)\s+[\w$]+\s*:\s*[A-Za-z]/.test(m) ||
+      /function\s*[\w$]*\s*(?:<[^>\n]*>)?\s*\([^)]*\b[\w$]+\??\s*:\s*[A-Za-z]/.test(m) ||
+      /\)\s*:\s*[A-Za-z][\w<>\[\]|, ]*\s*(?:\{|=>)/.test(m) ||
+      /\bas\s+(?:string|number|boolean|any|unknown|const)\b/.test(m)) return 'ts';
+  return 'js';
+}
+
+/* ---------- Stage 0: normalize pasted text ---------- */
+function stripLineNumbers(text) {
+  const lines = text.split('\n');
+  const re = /^[ \t]*(\d{1,5})(?:[ \t]*[|:)\]][ \t]?|\.[ \t]|\t|[ \t]{2}|[ \t]*$)/;
+  const nums = [];
+  let nonEmpty = 0;
+  for (const l of lines) {
+    if (!l.trim()) continue;
+    nonEmpty++;
+    const m = re.exec(l);
+    if (!m) return null;
+    nums.push(+m[1]);
+  }
+  if (nonEmpty < 5) return null;
+  let seq = 0;
+  for (let i = 1; i < nums.length; i++) if (nums[i] === nums[i - 1] + 1) seq++;
+  if (seq < (nums.length - 1) * 0.8) return null;
+  return lines.map(l => l.replace(re, '')).join('\n');
+}
+
+const SYMBOL_MAP = {
+  '\u2013': '-', '\u2014': '-', '\u2212': '-', '\u00d7': '*', '\u00f7': '/', '\u2026': '...', '\u2265': '>=', '\u2264': '<=',
+  '\u2260': '!==', '\u2192': '=>', '\uff1d': '=', '\uff08': '(', '\uff09': ')', '\uff1b': ';', '\uff0c': ',', '\uff1a': ':',
+  '\uff5b': '{', '\uff5d': '}', '\uff3b': '[', '\uff3d': ']'
+};
+const SYMBOL_RE = new RegExp('[' + Object.keys(SYMBOL_MAP).join('') + ']', 'g');
+const ENTITY_MAP = { '&lt;': '<', '&gt;': '>', '&amp;': '&', '&quot;': '"', '&#39;': "'", '&#x27;': "'" };
+
+function stageNormalize(text, log, ctx) {
+  // A. Markdown code fences (e.g. a pasted chat answer): keep only the JS blocks, keep line count
+  const L = text.split('\n');
+  const fences = [];
+  L.forEach((l, i) => { if (/^\s*(?:```|~~~)/.test(l)) fences.push(i); });
+  if (fences.length >= 2) {
+    const out = L.map(() => '');
+    let inside = false, ok = false, kept = 0;
+    L.forEach((l, i) => {
+      const f = /^\s*(?:```|~~~)\s*([\w+#.-]*)/.exec(l);
+      if (f) {
+        if (!inside) { inside = true; const lang = f[1].toLowerCase(); ok = !lang || /^(?:js|javascript|jsx|mjs|cjs|node|nodejs|ts|typescript|tsx|ecmascript)$/.test(lang); }
+        else { inside = false; ok = false; }
+        return;
+      }
+      if (inside && ok) { out[i] = l; kept++; }
+    });
+    if (kept > 0) {
+      let a = 0; while (a < out.length && out[a].trim() === '') a++;
+      let b = out.length; while (b > a && out[b - 1].trim() === '') b--;
+      text = out.slice(a, b).join('\n');
+      ctx.shift = a;
+      log.push({ cat: 'cleanup', type: 'fix', line: 1, msg: 'Extracted the code from a Markdown code block (the text and fences around it were removed).' });
+    }
+  }
+
+  // B. "# comment" lines (Python style) -> "// comment"
+  let hashes = 0, hashLine = 0;
+  text = text.split('\n').map((l, i) => {
+    const m = /^([ \t]*)#(?=[ \t]|$)(.*)$/.exec(l);
+    if (!m) return l;
+    hashes++; if (!hashLine) hashLine = i + 1 + ctx.shift;
+    return m[1] + '//' + m[2];
+  }).join('\n');
+  if (hashes) log.push({ cat: 'cleanup', type: 'fix', line: hashLine - ctx.shift, msg: 'Converted ' + hashes + ' "# comment" line' + (hashes === 1 ? '' : 's') + ' to "// comment".' });
+
+  // C. line-number gutter copied from an editor / website
+  const stripped = stripLineNumbers(text);
+  if (stripped !== null) {
+    text = stripped;
+    log.push({ cat: 'cleanup', type: 'fix', line: 1, msg: 'Removed the line numbers that were copied together with the code.' });
+  }
+
+  // D. invisible characters, odd spaces, smart quotes, look-alike symbols, HTML entities (code only)
+  text = text.replace(/^\uFEFF/, '');
+  let n = 0, firstLine = 0;
+  const note = (t, idx) => { n++; if (!firstLine) firstLine = lineAt(t, idx); };
+
+  text = rewrite(text, /[\u200B-\u200D\u2060\uFEFF\u00AD]/g, (m, masked, t) => { note(t, m.index); return { text: '' }; });
+  if (n) { log.push({ cat: 'cleanup', type: 'fix', line: firstLine, msg: 'Removed ' + n + ' invisible character' + (n === 1 ? '' : 's') + ' (zero-width / soft hyphen) that would break the code.' }); }
+
+  n = 0; firstLine = 0;
+  text = rewrite(text, /[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, (m, masked, t) => { note(t, m.index); return { text: ' ' }; });
+  if (n) log.push({ cat: 'cleanup', type: 'fix', line: firstLine, msg: 'Replaced ' + n + ' non-breaking / unusual space' + (n === 1 ? '' : 's') + ' with normal spaces.' });
+
+  n = 0; firstLine = 0;
+  text = rewrite(text, /[\u201C\u201E\u201F]([^\n\u201D\u201C]*)[\u201D\u201C]/g, (m, masked, t) => {
+    const inner = t.slice(m.index + 1, m.index + m[0].length - 1);
+    const q = inner.includes('"') ? (inner.includes("'") ? '`' : "'") : '"';
+    note(t, m.index);
+    return { text: q + inner + q };
+  });
+  text = rewrite(text, /[\u2018\u201A\u201B]([^\n]*?)\u2019(?=[ \t]*(?:[),;\]}:+\-*\/.?]|$))/gm, (m, masked, t) => {
+    const inner = t.slice(m.index + 1, m.index + m[0].length - 1);
+    const q = inner.includes("'") ? '"' : "'";
+    note(t, m.index);
+    return { text: q + inner + q };
+  });
+  if (n) log.push({ cat: 'cleanup', type: 'fix', line: firstLine, msg: 'Replaced ' + n + ' curly “smart” quote pair' + (n === 1 ? '' : 's') + ' with straight quotes.' });
+
+  n = 0; firstLine = 0;
+  text = rewrite(text, SYMBOL_RE, (m, masked, t) => { note(t, m.index); return { text: SYMBOL_MAP[m[0]] }; });
+  if (n) log.push({ cat: 'cleanup', type: 'fix', line: firstLine, msg: 'Replaced ' + n + ' look-alike symbol' + (n === 1 ? '' : 's') + ' (en/em dash, ×, ÷, …, full-width brackets …) with real JavaScript characters.' });
+
+  n = 0; firstLine = 0;
+  text = rewrite(text, /&(?:lt|gt|amp|quot|#39|#x27);/g, (m, masked, t) => { note(t, m.index); return { text: ENTITY_MAP[m[0]] }; });
+  if (n) log.push({ cat: 'cleanup', type: 'fix', line: firstLine, msg: 'Decoded ' + n + ' HTML entit' + (n === 1 ? 'y' : 'ies') + ' (&lt; &gt; &amp; …) that were pasted from a web page.' });
+
+  return text;
+}
+
+/* ---------- Stage 1: unterminated strings ---------- */
+function stageStrings(text, log) {
+  const { unterminated, openTemplates } = classify(text);
+  const edits = [];
+  for (const u of unterminated) {
+    // Put the quote before any trailing  ) ] } ; ,  so  print("hi);  ->  print("hi");
+    let pos = u.end;
+    while (pos > u.start + 1 && /[)\];,}\s]/.test(text[pos - 1])) pos--;
+    edits.push({ pos, text: u.quote });
+    log.push({ cat: 'strings', type: 'fix', line: lineAt(text, u.start),
+      msg: 'Closed an unterminated string (added the missing ' + u.quote + ').' });
+  }
+  for (const t of openTemplates) {
+    log.push({ cat: 'strings', type: 'warn', line: lineAt(text, t),
+      msg: 'Template literal opened with ` is never closed. Please check it manually.' });
+  }
+  return applyEdits(text, edits);
+}
+
+/* ---------- Stage 2: habits from other languages ---------- */
+function stageLang(text, log) {
+  const getDeclared = () => { const { kinds } = classify(text); return collectDeclared(maskText(text, kinds)); };
+  const declared = getDeclared();
+  const sub = (re, repl, msg, cond) => {
+    text = rewrite(text, re, (m, masked, t) => {
+      if (cond && !cond(m)) return null;
+      log.push({ cat: 'typos', type: 'fix', line: lineAt(t, m.index), msg: typeof msg === 'function' ? msg(m) : msg });
+      return { text: typeof repl === 'function' ? repl(m) : repl };
+    });
+  };
+  sub(/(?<![\w$.])True(?![\w$:])/g, 'true', 'Python `True` \u2192 `true`.', () => !declared.has('True'));
+  sub(/(?<![\w$.])False(?![\w$:])/g, 'false', 'Python `False` \u2192 `false`.', () => !declared.has('False'));
+  sub(/(?<![\w$.])None(?![\w$:])/g, 'null', 'Python `None` \u2192 `null`.', () => !declared.has('None'));
+  sub(/(?<![\w$.])(?:elif|elsif|elseif)(?![\w$])/g, 'else if', (m) => 'Fixed `' + m[0] + '` \u2192 `else if`.', (m) => !declared.has(m[0]));
+  sub(/(?<![\w$.])len\(\s*([A-Za-z_$][\w$.]*)\s*\)/g, (m) => m[1] + '.length', (m) => 'Python `' + m[0].replace(/\s+/g, '') + '` \u2192 `' + m[1] + '.length`.', () => !declared.has('len'));
+  sub(/(?<![\w$.])str\(/g, 'String(', 'Python `str(` \u2192 `String(`.', () => !declared.has('str'));
+  sub(/(?<![\w$.])int\(/g, 'parseInt(', 'Python `int(` \u2192 `parseInt(`.', () => !declared.has('int'));
+  sub(/(?<![\w$.])float\(/g, 'parseFloat(', 'Python `float(` \u2192 `parseFloat(`.', () => !declared.has('float'));
+  sub(/(?<=[^\n \t][ \t]+)and(?=[ \t]+[^\s=,;)\]}])/g, '&&', 'Python `and` \u2192 `&&`.', () => !declared.has('and'));
+  sub(/(?<=[^\n \t][ \t]+)or(?=[ \t]+[^\s=,;)\]}])/g, '||', 'Python `or` \u2192 `||`.', () => !declared.has('or'));
+  sub(/(?<![\w$.])not(?=[ \t]+[\w$(\[!])/g, '!', 'Python `not` \u2192 `!`.', () => !declared.has('not'));
+  return text;
+}
+
+/* ---------- Stage 3: misspelled / foreign keywords at the start of a statement ---------- */
+const TYPE_WORDS = new Set(['int', 'float', 'double', 'long', 'short', 'byte', 'char', 'string', 'String', 'bool', 'boolean',
+  'auto', 'number', 'Integer', 'Double', 'Boolean', 'Long', 'dynamic', 'object', 'decimal', 'Number', 'Object']);
+const FN_ALIASES = new Set(['fn', 'fun', 'func', 'def', 'sub', 'proc', 'method', 'funct']);
+
+function stageKeywords(text, log) {
+  const { kinds } = classify(text);
+  const masked = maskText(text, kinds);
+  const declared = collectDeclared(masked);
+  const counts = new Map();
+  for (const m of masked.matchAll(/[A-Za-z_$][\w$]*/g)) counts.set(m[0], (counts.get(m[0]) || 0) + 1);
+  const edits = [];
+  const lines = masked.split('\n');
+  let off = 0;
+
+  lines.forEach((ml) => {
+    const base = off; off += ml.length + 1;
+    const m = /^([ \t]*(?:\}[ \t]*)?)([A-Za-z_$][\w$]*)([ \t]*)(.*)$/.exec(ml);
+    if (!m) return;
+    const word = m[2], sep = m[3], rest = m[4];
+    if (RESERVED.has(word) || declared.has(word)) return;
+    const wpos = base + m[1].length;
+    const line = lineAt(text, wpos);
+    let done = false;
+    const swap = (to, why) => {
+      edits.push({ pos: wpos, del: word.length, text: to });
+      log.push({ cat: 'typos', type: 'fix', line, msg: why || ('Fixed `' + word + '` \u2192 `' + to + '`.') });
+      done = true;
+    };
+
+    // (a) "W name =" / "W name;"  -> declaration keyword (const/let/var) or a C/Java/TS style type
+    if (!done && sep && /^[A-Za-z_$][\w$]*[ \t]*(?:=(?!=)|;|,|$)/.test(rest)) {
+      const kw = ['const', 'let', 'var'].find(k => closeWord(word, k));
+      if (kw) swap(kw);
+      else if (TYPE_WORDS.has(word)) swap('let', 'Replaced the type `' + word + '` with `let` (JavaScript has no declared types).');
+      else if (word === 'val') swap('const', 'Replaced `val` with `const`.');
+    }
+    // (b) "W name(...) {"  -> function
+    if (!done && sep) {
+      const pm = /^([A-Za-z_$][\w$]*)[ \t]*\(/.exec(rest);
+      if (pm) {
+        const openIdx = wpos + word.length + sep.length + pm[0].length - 1;
+        const close = findClose(masked, openIdx);
+        if (close !== -1 && /^\s*\{/.test(masked.slice(close + 1, close + 200))) {
+          if (closeWord(word, 'function') || FN_ALIASES.has(word)) swap('function');
+        }
+      }
+    }
+    // (c) "W expression"  -> return / throw / await / typeof ...
+    if (!done && sep && word.length >= 5) {
+      const nx = /^([A-Za-z_$][\w$]*|[\d"'`!])/.exec(rest);
+      if (nx && !/^(?:in|of|instanceof|as|extends|from)$/.test(nx[1])) {
+        const kw = ['return', 'throw', 'await', 'typeof', 'delete', 'yield'].find(k => closeWord(word, k));
+        if (kw) swap(kw);
+      }
+    }
+    // (d) lone "brek;" / "contiune;"
+    if (!done && word.length >= 5 && /^;?\s*$/.test(rest) && !sep.includes('\n') && counts.get(word) === 1) {
+      const kw = ['break', 'continue'].find(k => closeWord(word, k));
+      if (kw) swap(kw);
+    }
+    // (e) "calss Foo {"
+    if (!done && sep && word.length >= 4 && /^[A-Za-z_$][\w$]*[ \t]*(?:extends\b|\{|$)/.test(rest)) {
+      if (closeWord(word, 'class')) swap('class');
+    }
+    // (f) "whlie (x) {" / "swtich (x) {" / "cacth (e) {" / "fianlly {"
+    if (!done && word.length >= 5) {
+      const after = rest.replace(/^[ \t]*/, '');
+      if (after[0] === '(') {
+        const openIdx = base + ml.length - rest.length + (rest.length - after.length);
+        const close = findClose(masked, openIdx);
+        if (close !== -1 && /^\s*\{/.test(masked.slice(close + 1, close + 200))) {
+          const kw = ['while', 'switch', 'catch'].find(k => closeWord(word, k));
+          if (kw) swap(kw);
+        }
+      } else if (m[1].includes('}') && /^\{/.test(after) && closeWord(word, 'finally')) swap('finally');
+    }
+    // (g) "} esle {" / "} els if"
+    if (!done && m[1].includes('}') && word.length >= 3 && /^(?:\{|if\b)/.test(rest) && closeWord(word, 'else')) swap('else');
+  });
+  return applyEdits(text, edits);
+}
+
+/* ---------- Stage 4: typos and naming mistakes ---------- */
+const TYPO_MAP = {
+  // length
+  lenght: 'length', lengh: 'length', legnth: 'length', lenth: 'length', lengthh: 'length',
+  // keywords
+  fucntion: 'function', funtion: 'function', fuction: 'function', fucnction: 'function', functoin: 'function', fnuction: 'function',
+  retrun: 'return', reutrn: 'return', rturn: 'return', retunr: 'return', retrn: 'return',
+  cosnt: 'const', conts: 'const', whlie: 'while', esle: 'else', improt: 'import', swtich: 'switch', brek: 'break',
+  // literals
+  flase: 'false', ture: 'true', undefinded: 'undefined', undefind: 'undefined', undefiend: 'undefined',
+  // console / DOM
+  consle: 'console', cosole: 'console', conosle: 'console', consol: 'console',
+  documnet: 'document', docuemnt: 'document', doucment: 'document',
+  getElementByID: 'getElementById', getElementbyId: 'getElementById', getelementbyid: 'getElementById',
+  getElementsByClassname: 'getElementsByClassName',
+  queryselector: 'querySelector', queryselectorAll: 'querySelectorAll', queryselectorall: 'querySelectorAll',
+  innerHtml: 'innerHTML', innerhtml: 'innerHTML', textcontent: 'textContent',
+  addEventListner: 'addEventListener', addeventlistener: 'addEventListener', addEventlistener: 'addEventListener',
+  createelement: 'createElement', appendchild: 'appendChild', preventdefault: 'preventDefault',
+  // common method / global casing
+  foreach: 'forEach', psuh: 'push', puhs: 'push', forech: 'forEach', stringfy: 'stringify',
+  tostring: 'toString', toLowercase: 'toLowerCase', toUppercase: 'toUpperCase',
+  parseint: 'parseInt', parsefloat: 'parseFloat', isnan: 'isNaN',
+  settimeout: 'setTimeout', setinterval: 'setInterval'
+};
+const TYPO_RE = new RegExp('(?<![\\w$])(' + Object.keys(TYPO_MAP).join('|') + ')(?![\\w$])', 'g');
+
+const OUTPUT_ALIASES = [
+  [/\bSystem\s*\.\s*out\s*\.\s*print(?:ln)?\s*\(/g, 'console.log(', 'Replaced Java-style `System.out.println(` with `console.log(`.'],
+  [/\bSystem\s*\.\s*err\s*\.\s*print(?:ln)?\s*\(/g, 'console.error(', 'Replaced Java-style `System.err.println(` with `console.error(`.'],
+  [/(?<![\w$.])(?:System\s*\.\s*)?Console\s*\.\s*Write(?:Line)?\s*\(/g, 'console.log(', 'Replaced C# `Console.WriteLine(` with `console.log(`.'],
+  [/(?<![\w$.])fmt\s*\.\s*Print(?:ln|f)?\s*\(/g, 'console.log(', 'Replaced Go `fmt.Println(` with `console.log(`.'],
+  [/(?<![\w$.])Debug\s*\.\s*Log\s*\(/g, 'console.log(', 'Replaced `Debug.Log(` with `console.log(`.']
+];
+
+function stageTypos(text, log) {
+  // 4a. Misspelled identifiers (only in real code, never inside strings/comments)
+  text = rewrite(text, TYPO_RE, (m, masked, t) => {
+    const fix = TYPO_MAP[m[1]];
+    log.push({ cat: 'typos', type: 'fix', line: lineAt(t, m.index),
+      msg: 'Fixed typo `' + m[1] + '` \u2192 `' + fix + '`.' });
+    return { text: fix };
+  });
+
+  // 4b. Wrong casing on console: Console.log -> console.log, console.Log -> console.log
+  text = rewrite(text, /(?<![\w$.])Console(?=\s*\.\s*(?:log|warn|error|info)\b)/g, (m, masked, t) => {
+    log.push({ cat: 'typos', type: 'fix', line: lineAt(t, m.index), msg: 'Fixed `Console` \u2192 `console` (JavaScript is case-sensitive).' });
+    return { text: 'console' };
+  });
+  text = rewrite(text, /\bconsole\s*\.\s*(Log|LOG|Warn|Error|Info)\b/g, (m, masked, t) => {
+    const fixed = m[0].replace(/(Log|LOG|Warn|Error|Info)$/, s => s.toLowerCase());
+    log.push({ cat: 'typos', type: 'fix', line: lineAt(t, m.index), msg: 'Fixed `' + m[0].replace(/\s+/g, '') + '` \u2192 `' + fixed.replace(/\s+/g, '') + '`.' });
+    return { text: fixed };
+  });
+
+  // 4c. print(...) / println(...) / puts(...) / System.out.println(...)  ->  console.log(...)
+  for (const [re, repl, msg] of OUTPUT_ALIASES) {
+    text = rewrite(text, re, (m, masked, t) => {
+      log.push({ cat: 'typos', type: 'fix', line: lineAt(t, m.index), msg });
+      return { text: repl };
+    });
+  }
+  const { kinds } = classify(text);
+  const declared = collectDeclared(maskText(text, kinds));
+  text = rewrite(text, /(?<![\w$.])(?<!\bfunction\s+)(?<!\bnew\s+)(print|println|puts|printf|writeln|echo)\s*\(/g, (m, masked, t) => {
+    if (declared.has(m[1])) return null;                                  // the program defines its own
+    const close = findClose(masked, m.index + m[0].length - 1);
+    if (close === -1) return null;
+    if (/^\s*\{/.test(masked.slice(close + 1))) return null;               // method definition: print() { ... }
+    if (masked.slice(m.index + m[0].length, close).trim() === '' && m[1] === 'print') return null;   // window.print()
+    log.push({ cat: 'typos', type: 'fix', line: lineAt(t, m.index), msg: 'Replaced `' + m[1] + '(` with `console.log(` (' + m[1] + ' is not a JavaScript function).' });
+    return { text: 'console.log(' };
+  });
+  return text;
+}
+
+/* ---------- Stage 5: operator slips ---------- */
+function stageOperators(text, log) {
+  const rules = [
+    [/(?<![=!<>+\-*\/%&|^])=<(?!=)/g, '<=', 'Fixed `=<` \u2192 `<=` (the comparison operator is written the other way round).'],
+    [/(?<![=!<>])=[ \t]+>(?!=)/g, '=>', 'Fixed `= >` \u2192 `=>`.'],
+    [/(?<![=!<>])=[ \t]=[ \t]=(?!=)/g, '===', 'Fixed `= = =` \u2192 `===`.'],
+    [/(?<![=!<>])=[ \t]=(?![=\s]*=)(?!=)/g, '===', 'Fixed `= =` \u2192 `===`.'],
+    [/\)[ \t]*->[ \t]*/g, ') => ', 'Fixed `->` \u2192 `=>` (JavaScript arrow functions use `=>`).'],
+    [/(?<=[(,=][ \t]*)([A-Za-z_$][\w$]*)[ \t]*->[ \t]*(?=[\w$({\['"`!-])/g, (m) => m[1] + ' => ', 'Fixed `->` \u2192 `=>` (JavaScript arrow functions use `=>`).'],
+    [/(?<=[\w$)\]]\s*\.\s*length)[ \t]*\([ \t]*\)/g, '', 'Removed `()` after `.length` (length is a property, not a method).']
+  ];
+  for (const [re, repl, msg] of rules) {
+    text = rewrite(text, re, (m, masked, t) => {
+      log.push({ cat: 'typos', type: 'fix', line: lineAt(t, m.index), msg });
+      return { text: typeof repl === 'function' ? repl(m) : repl };
+    });
+  }
+  return text;
+}
+
+/* ---------- Stage 6: for (i = 0, i < n, i++) ---------- */
+function stageFor(text, log) {
+  return rewrite(text, /\bfor\s*(?:await\s*)?\(/g, (m, masked, t) => {
+    const open = m.index + m[0].length - 1;
+    const close = findClose(masked, open);
+    if (close === -1) return null;
+    const inner = masked.slice(open + 1, close);
+    if (/\b(?:of|in)\b/.test(inner)) return null;
+    const tops = [];
+    let depth = 0;
+    for (let k = 0; k < inner.length; k++) {
+      const c = inner[k];
+      if ('([{'.includes(c)) depth++;
+      else if (')]}'.includes(c)) depth--;
+      else if (depth === 0 && (c === ',' || c === ';')) tops.push({ k, c });
+    }
+    const semis = tops.filter(x => x.c === ';');
+    let commas = tops.filter(x => x.c === ',');
+    let fixIdx = null;
+    const looksCond = (s) => /[<>]|[!=]==?/.test(s);
+    const looksStep = (s) => /\+\+|--|[+\-*\/]=|=/.test(s);
+    if (semis.length === 0 && commas.length >= 2 && /^\s*(?:(?:let|const|var)\s+)?[\w$]+\s*=/.test(inner)) {
+      const a = commas[commas.length - 2], b = commas[commas.length - 1];
+      if (looksCond(inner.slice(a.k + 1, b.k)) && looksStep(inner.slice(b.k + 1))) fixIdx = [a.k, b.k];
+    } else if (semis.length === 1) {
+      commas = commas.filter(c => c.k > semis[0].k);
+      if (commas.length === 1 && looksCond(inner.slice(semis[0].k + 1, commas[0].k)) && looksStep(inner.slice(commas[0].k + 1))) fixIdx = [commas[0].k];
+    }
+    if (!fixIdx) return null;
+    const chars = t.slice(open + 1, close).split('');
+    fixIdx.forEach(k => { chars[k] = ';'; });
+    const out = chars.join('');
+    log.push({ cat: 'brackets', type: 'fix', line: lineAt(t, m.index),
+      msg: 'Fixed the `for` header: parts must be separated by `;` not `,`: `for (' + clip(t.slice(open + 1, close).trim()) + ')` \u2192 `for (' + clip(out.trim()) + ')`.' });
+    return { from: open + 1, to: close, text: out };
+  });
+}
+
+/* ---------- Stage 7: conditions ---------- */
+function stageConditions(text, log) {
+  // 7a. "if x > 5 {"  ->  "if (x > 5) {"
+  text = rewrite(text, /^([ \t]*(?:\}[ \t]*)?(?:else[ \t]+)?)(if|while)([ \t]+)(?![ \t(])([^\n{;]+?)([ \t]*\{[ \t]*)$/gm, (m, masked, t) => {
+    const from = m.index + m[1].length + m[2].length + m[3].length;
+    const cond = t.slice(from, from + m[4].length);
+    if (/(?:[+\-*\/%=&|<>?:,]|=>)\s*$/.test(cond.trimEnd())) return null;
+    log.push({ cat: 'brackets', type: 'fix', line: lineAt(t, m.index), msg: 'Added the missing parentheses around the condition: `' + m[2] + ' (' + clip(cond.trim()) + ')`.' });
+    return { from, to: from + cond.length, text: '(' + cond + ')' };
+  });
+
+  // 7b. "=" instead of "===" and "=>" instead of ">="
+  const LIT = /^(?:[-+]?(?:\d[\w.]*|Infinity)|true|false|null|undefined|NaN|'[^'\n]*'|"[^"\n]*"|`[^`\n]*`)$/;
+  return rewrite(text, /\b(if|while)\s*\(/g, (m, masked, t) => {
+    const open = m.index + m[0].length - 1;
+    let close = findClose(masked, open);
+    if (close === -1) {                       // unbalanced: fall back to end of line
+      const nl = masked.indexOf('\n', open);
+      close = nl === -1 ? masked.length : nl;
+    }
+    const body = masked.slice(open + 1, close);
+    const fixes = [];
+    let depth = 0;
+    for (let k = 0; k < body.length; k++) {
+      const c = body[k];
+      if ('([{'.includes(c)) { depth++; continue; }
+      if (')]}'.includes(c)) { depth--; continue; }
+      if (depth !== 0 || c !== '=') continue;
+      const prev = body[k - 1] || '', next = body[k + 1] || '';
+      if (next === '>') {                                       // "=>" at the top level of a condition
+        if (/[\w$)\]]\s*$/.test(body.slice(0, k))) fixes.push({ k, len: 2, text: '>=', what: '`=>` \u2192 `>=`' });
+        k++; continue;
+      }
+      if (next === '=') { k += body[k + 2] === '=' ? 2 : 1; continue; }          // == or ===
+      if ('!<>+-*/%&|^?='.includes(prev)) continue;                              // != <= >= += ...
+      // a lone "=": decide from the right-hand side
+      let e = k + 1, d2 = 0;
+      for (; e < body.length; e++) {
+        const ce = body[e];
+        if ('([{'.includes(ce)) d2++;
+        else if (')]}'.includes(ce)) d2--;
+        else if (d2 === 0 && /^(?:&&|\|\||\?\?)/.test(body.slice(e, e + 2))) break;
+      }
+      const rhs = t.slice(open + 1 + k + 1, open + 1 + e).trim();
+      if (LIT.test(rhs)) fixes.push({ k, len: 1, text: '===', what: '`=` \u2192 `===`' });
+      else if (m[1] === 'if' && /^[\w$.]+$/.test(rhs)) {
+        log.push({ cat: 'assign', type: 'warn', line: lineAt(t, m.index), msg: 'Possible accidental assignment in `if (' + clip(t.slice(open + 1, close).trim()) + ')`. Left unchanged because the right side is a variable; use `===` if you meant to compare.' });
+      }
+    }
+    if (!fixes.length) return null;
+    let out = t.slice(open + 1, close);
+    fixes.sort((a, b) => b.k - a.k).forEach(f => { out = out.slice(0, f.k) + f.text + out.slice(f.k + f.len); });
+    log.push({ cat: 'assign', type: 'fix', line: lineAt(t, m.index),
+      msg: 'Fixed ' + fixes.map(f => f.what).join(' and ') + ' inside `' + m[1] + '`: `' + m[1] + ' (' + clip(t.slice(open + 1, close).trim()) + ')` \u2192 `' + m[1] + ' (' + clip(out.trim()) + ')`.' });
+    return { from: open + 1, to: close, text: out };
+  });
+}
+
+/* ---------- Stage 8: brackets ---------- */
+const OPEN_OF = { ')': '(', ']': '[', '}': '{' };
+const CLOSE_OF = { '(': ')', '[': ']', '{': '}' };
+
+function stageBrackets(text, log) {
+  /* 8a. A line that ends in "{" but still has an unclosed "(" before it, e.g.
+         `function f(a, b {`  or  `if (x > 1 {`  ->  insert the ")" just before the "{". */
+  {
+    const { kinds } = classify(text);
+    const masked = maskText(text, kinds);
+    const edits = [];
+    let offset = 0;
+    masked.split('\n').forEach((ml, ln) => {
+      const lineStart = offset; offset += ml.length + 1;
+      const trimmed = ml.trimEnd();
+      if (!trimmed.endsWith('{')) return;
+      const before = trimmed.slice(0, -1);
+      const stack = [];
+      for (let k = 0; k < before.length; k++) {
+        if (before[k] === '(') stack.push(k);
+        else if (before[k] === ')') stack.pop();
+      }
+      if (!stack.length) return;
+      const content = before.slice(stack[0] + 1).trim();
+      // a call like foo(function() {  or  foo(a, {  is legitimately open: leave it alone
+      if (!content || /[,(\[{]$/.test(content) || /\bfunction\b|=>/.test(content)) return;
+      let j = before.length;
+      while (j > 0 && /\s/.test(before[j - 1])) j--;
+      edits.push({ pos: lineStart + j, text: ')'.repeat(stack.length) });
+      log.push({ cat: 'brackets', type: 'fix', line: ln + 1,
+        msg: 'Added missing `' + ')'.repeat(stack.length) + '` before `{`.' });
+    });
+    text = applyEdits(text, edits);
+  }
+
+  /* 8b. General bracket matching with a stack. */
+  const { kinds } = classify(text);
+  const masked = maskText(text, kinds);
+  const edits = [];
+  const stack = [];
+
+  // Where to put the closer of an unclosed ( or [ : at the end of its own line when
+  // that line looks like a complete statement, otherwise return -1.
+  function lineEndPos(openIdx) {
+    let e = text.indexOf('\n', openIdx); if (e === -1) e = text.length;
+    let j = e - 1;
+    while (j > openIdx && (/\s/.test(text[j]) || kinds[j] === K_COM)) j--;
+    if (text[j] === ';' && kinds[j] === K_CODE) { j--; while (j > openIdx && /\s/.test(text[j])) j--; }
+    if (j <= openIdx) return -1;
+    const last = text[j];
+    if (kinds[j] === K_CODE && /[,(\[{:+\-*\/%=&|?<>.^~!]/.test(last)) return -1;
+    return j + 1;
+  }
+
+  function placeCloser(u, fallbackPos, fallbackIsEOF) {
+    const closer = CLOSE_OF[u.ch];
+    const line = lineAt(text, u.i);
+    // The problem was spotted on the same line as the opener (e.g. `[1, 2 }` or `foo(1, 2;`):
+    // close it right there, just before the offending character.
+    if (!fallbackIsEOF && lineAt(text, fallbackPos) === line) {
+      let p = fallbackPos;
+      while (p > u.i + 1 && /\s/.test(text[p - 1])) p--;
+      edits.push({ pos: p, text: closer });
+      log.push({ cat: 'brackets', type: 'fix', line, msg: 'Added missing closing `' + closer + '` for the `' + u.ch + '` opened on this line.' });
+      return;
+    }
+    if (u.ch !== '{') {
+      const pos = lineEndPos(u.i);
+      if (pos !== -1) {
+        edits.push({ pos, text: closer });
+        log.push({ cat: 'brackets', type: 'fix', line, msg: 'Added missing closing `' + closer + '` for the `' + u.ch + '` opened on this line.' });
+        return;
+      }
+    }
+    if (fallbackIsEOF) {
+      const trimmedEnd = text.replace(/\s+$/, '').length;
+      edits.push({ pos: trimmedEnd, text: '\n' + closer });
+      log.push({ cat: 'brackets', type: 'fix', line, msg: 'Added missing closing `' + closer + '` at the end of the code for the `' + u.ch + '` opened here.' });
+    } else {
+      edits.push({ pos: fallbackPos, text: closer + (u.ch === '{' ? ' ' : '') });
+      log.push({ cat: 'brackets', type: 'fix', line, msg: 'Added missing closing `' + closer + '` for the `' + u.ch + '` opened here.' });
+    }
+  }
+
+  for (let i = 0; i < masked.length; i++) {
+    const ch = masked[i];
+    if (ch === '(' || ch === '[' || ch === '{') {
+      const isFor = ch === '(' && /\bfor(?:\s+await)?\s*$/.test(masked.slice(Math.max(0, i - 14), i));
+      stack.push({ ch, i, isFor });
+    } else if (ch === ';') {
+      // A ";" ends a statement. If a ( or [ is still open (and we are not inside a
+      // `for (;;)` header) that bracket was never closed: close it here.
+      const top = stack[stack.length - 1];
+      if (top && (top.ch === '(' || top.ch === '[') && !top.isFor) {
+        let k = stack.length;
+        while (k > 0 && stack[k - 1].ch !== '{' && !(stack[k - 1].ch === '(' && stack[k - 1].isFor)) k--;
+        const unclosed = stack.splice(k).reverse();          // innermost first
+        for (const u of unclosed) placeCloser(u, i, false);
+      }
+    } else if (ch === ')' || ch === ']' || ch === '}') {
+      const want = OPEN_OF[ch];
+      const top = stack[stack.length - 1];
+      if (top && top.ch === want) { stack.pop(); continue; }
+      let k = stack.length - 1;
+      while (k >= 0 && stack[k].ch !== want) k--;
+      if (k === -1) {
+        edits.push({ pos: i, del: 1 });          // stray closer: remove it
+        log.push({ cat: 'brackets', type: 'fix', line: lineAt(text, i), msg: 'Removed unmatched closing `' + ch + '`.' });
+      } else {
+        const unclosed = stack.splice(k + 1).reverse();   // innermost first
+        for (const u of unclosed) placeCloser(u, i, false);
+        stack.pop();                                       // the opener that matches this closer
+      }
+    }
+  }
+  for (const u of stack.reverse()) placeCloser(u, text.length, true);
+
+  return applyEdits(text, edits);
+}
+
+/* ---------- shared: bracket context per line (used by commas + semicolons) ---------- */
+
+/**
+ * One pass over the masked code that records, for each line, the bracket context at the
+ * END of the line (so we never add ';' inside an object literal / call arguments) and
+ * whether the line ends with the ")" of an if/while/for/switch/catch header.
+ */
+function analyzeStructure(masked, noCom) {
+  const noComLines = noCom.split('\n');
+  const stack = [], res = [];
+  let rawTail = '', lastCloseIdx = -1, lastCloseControl = false, lastBraceAfterDo = false;
+  let lineNo = 0, lineStart = 0, opens = 0, closes = 0;
+
+  for (let i = 0; i <= masked.length; i++) {
+    const ch = i < masked.length ? masked[i] : '\n';
+    if (ch === '\n') {
+      const trimmedEnd = (noComLines[lineNo] || '').trimEnd();
+      const endIdx = trimmedEnd.length ? lineStart + trimmedEnd.length - 1 : -1;
+      const top = stack[stack.length - 1];
+      res.push({
+        top: !top ? 'none' : top.ch === '(' ? 'paren' : top.ch === '[' ? 'bracket' : top.obj ? 'obj' : 'block',
+        endsControlClose: endIdx >= 0 && endIdx === lastCloseIdx && lastCloseControl,
+        balanced: opens === closes
+      });
+      lineNo++; lineStart = i + 1; opens = 0; closes = 0;
+      rawTail = (rawTail + ' ').slice(-16);
+      continue;
+    }
+    if (ch === '(') {
+      opens++;
+      const m = /(if|while|for|switch|catch|with)\s*$/.exec(rawTail);
+      let control = !!m && (m.index === 0 || !/[\w$]/.test(rawTail[m.index - 1]));
+      if (control && m[1] === 'while' && rawTail.slice(0, m.index).trimEnd().endsWith('}') && lastBraceAfterDo) control = false; // do { } while (x)
+      stack.push({ ch, control });
+    } else if (ch === '[') {
+      opens++; stack.push({ ch });
+    } else if (ch === '{') {
+      opens++;
+      const p = rawTail.trimEnd().slice(-1);
+      const caseBlock = p === ':' && /^\s*(?:case\b|default\b)/.test(masked.slice(lineStart, i));
+      const obj = !caseBlock && ((p !== '' && '=(,:[?'.includes(p)) || /(^|[^\w$])(?:return|default|yield)\s*$/.test(rawTail));
+      stack.push({ ch, obj, afterDo: /(^|[^\w$])do\s*$/.test(rawTail) });
+    } else if (ch === ')' || ch === ']' || ch === '}') {
+      closes++;
+      const want = OPEN_OF[ch];
+      let k = stack.length - 1;
+      while (k >= 0 && stack[k].ch !== want) k--;
+      if (k >= 0) {
+        const popped = stack[k];
+        stack.length = k;
+        if (ch === ')') { lastCloseIdx = i; lastCloseControl = !!popped.control; }
+        if (ch === '}') lastBraceAfterDo = !!popped.afterDo;
+      }
+    }
+    rawTail = (rawTail + ch).slice(-16);
+  }
+  return res;
+}
+
+/* ---------- Stage 9: missing commas in multi-line objects / arrays (only when the code is broken) ---------- */
+function stageCommas(text, log) {
+  const { kinds } = classify(text);
+  const masked = maskText(text, kinds);
+  const noCom = stripComments(text, kinds);
+  const lines = text.split('\n');
+  const nLines = noCom.split('\n');
+  const info = analyzeStructure(masked, noCom);
+  const starts = []; let o = 0;
+  for (const l of lines) { starts.push(o); o += l.length + 1; }
+  const edits = [];
+
+  for (let li = 0; li < lines.length; li++) {
+    const s = info[li];
+    if (!s || (s.top !== 'obj' && s.top !== 'bracket')) continue;
+    const t = nLines[li].trim();
+    if (!t) continue;
+    const startNl = li > 0 ? kinds[starts[li] - 1] : K_CODE;
+    const endNlIdx = starts[li] + lines[li].length;
+    const endNl = endNlIdx < text.length ? kinds[endNlIdx] : K_CODE;
+    if (startNl !== K_CODE || endNl !== K_CODE) continue;
+    if (!/[\w$'"`)\]}]$/.test(t)) continue;                                  // line must end like a finished value
+    if (/(?:^|[^\w$.])(?:return|throw|new|typeof|await|yield|in|of|instanceof|else|do|case|default|var|let|const|async|export|import|extends|delete|void)$/.test(t)) continue;
+    let nj = li + 1;
+    while (nj < lines.length && !nLines[nj].trim()) nj++;
+    if (nj >= lines.length) continue;
+    const nt = nLines[nj].trim();
+    if (/^(?:in|instanceof|of|as|else|catch|finally)\b/.test(nt)) continue;
+    let startsItem;
+    if (s.top === 'obj') {
+      startsItem = /^(?:[A-Za-z_$][\w$]*\s*(?::(?!:)|\(|,|$)|'[^'\n]*'\s*:|"[^"\n]*"\s*:|\[[^\]\n]*\]\s*:|\.\.\.|(?:get|set|async)\s+[\w$]+\s*\()/.test(nt);
+    } else {
+      startsItem = /^(?:[A-Za-z_$\d'"`\[{]|\.\.\.)/.test(nt);
+    }
+    if (!startsItem) continue;
+    edits.push({ pos: starts[li] + nLines[li].trimEnd().length, text: ',' });
+    log.push({ cat: 'commas', type: 'fix', line: li + 1, msg: 'Added a missing comma between two ' + (s.top === 'obj' ? 'object properties' : 'array items') + '.' });
+  }
+  return applyEdits(text, edits);
+}
+
+/* ---------- Stage 10: fuzzy repair of identifiers and built-in property names ---------- */
+function stageFuzzy(text, log) {
+  const { kinds } = classify(text);
+  const masked = maskText(text, kinds);
+  const declared = collectDeclared(masked);
+  const counts = new Map();
+  const toks = [];
+  const re = /[A-Za-z_$][\w$]*/g;
+  let m;
+  while ((m = re.exec(masked))) {
+    const w = m[0], i = m.index;
+    if (i > 0 && /[\w$]/.test(masked[i - 1])) continue;                      // part of a number like 1e5
+    let p = i - 1;
+    while (p >= 0 && (masked[p] === ' ' || masked[p] === '\t')) p--;
+    const prop = p >= 0 && masked[p] === '.' && masked[p - 1] !== '.';
+    let q = i + w.length;
+    while (q < masked.length && (masked[q] === ' ' || masked[q] === '\t')) q++;
+    toks.push({ w, i, prop, next: masked[q] || '', afterNew: !prop && /\bnew\s+$/.test(masked.slice(Math.max(0, i - 8), i)) });
+    counts.set(w, (counts.get(w) || 0) + 1);
+  }
+  const definedProps = new Set();
+  for (const mm of masked.matchAll(/([A-Za-z_$][\w$]*)\s*:(?!:)/g)) definedProps.add(mm[1]);
+  for (const mm of masked.matchAll(/\.\s*([A-Za-z_$][\w$]*)\s*=(?![=>])/g)) definedProps.add(mm[1]);
+  for (const mm of masked.matchAll(/(?:\bget|\bset|\bstatic|\basync|\*)\s*([A-Za-z_$][\w$]*)\s*\(/g)) definedProps.add(mm[1]);
+
+  const poolDecl = [...declared].filter(w => w.length >= 4 && !RESERVED.has(w));
+  const lowerDecl = new Map();
+  poolDecl.forEach(w => { const k = w.toLowerCase(); lowerDecl.set(k, lowerDecl.has(k) ? null : w); });
+  const lowerGlob = new Map();
+  [...GLOBALS].forEach(w => { const k = w.toLowerCase(); lowerGlob.set(k, lowerGlob.has(k) ? null : w); });
+  const lowerProp = new Map();
+  [...KNOWN_PROPS].forEach(w => { const k = w.toLowerCase(); lowerProp.set(k, lowerProp.has(k) ? null : w); });
+  const globList = [...GLOBALS].filter(w => w.length >= 5);
+  const propList = [...KNOWN_PROPS];
+  const cache = new Map();
+  const edits = [];
+
+  for (const t of toks) {
+    const w = t.w;
+    if (w.length < 4 || RESERVED.has(w)) continue;
+    let cand = null;
+    const key = (t.prop ? 'p:' : (t.next === '.' || t.afterNew ? 'g:' : 'i:')) + w;
+    if (cache.has(key)) cand = cache.get(key);
+    else {
+      const total = counts.get(w) || 0;
+      if (t.prop) {
+        if (!KNOWN_PROPS.has(w) && !declared.has(w) && !definedProps.has(w) && total <= 2) {
+          const ci = lowerProp.get(w.toLowerCase());
+          cand = (ci && ci !== w) ? ci : bestTypo(w, propList);
+        }
+      } else if (!declared.has(w) && !GLOBALS.has(w) && t.next !== ':' && total <= 2) {
+        const ciD = lowerDecl.get(w.toLowerCase());
+        if (ciD && ciD !== w) cand = ciD;
+        else {
+          const ciG = (t.next === '.' || t.afterNew) ? lowerGlob.get(w.toLowerCase()) : null;
+          if (ciG && ciG !== w) cand = ciG;
+          else cand = bestTypo(w, poolDecl) || ((t.next === '.' || t.afterNew) ? bestTypo(w, globList) : null);
+        }
+      }
+      cache.set(key, cand);
+    }
+    if (!cand) continue;
+    edits.push({ pos: t.i, del: w.length, text: cand });
+    log.push({ cat: 'typos', type: 'fix', line: lineAt(text, t.i),
+      msg: 'Fixed ' + (t.prop ? 'property' : 'name') + ' `' + w + '` \u2192 `' + cand + '`' + (t.prop ? '.' : ' (it is not defined anywhere, but `' + cand + '` is).') });
+  }
+  return applyEdits(text, edits);
+}
+
+/* ---------- Stage 11: await inside a function that is not async ---------- */
+function describeFn(masked, bi) {
+  let k = bi - 1;
+  while (k >= 0 && /\s/.test(masked[k])) k--;
+  if (k < 0) return null;
+  let hdr = -1, kind = '', noAsync = false;
+  if (masked[k] === '>' && masked[k - 1] === '=') {
+    let p = k - 2;
+    while (p >= 0 && /\s/.test(masked[p])) p--;
+    if (masked[p] === ')') { const o = findOpen(masked, p); if (o < 0) return null; hdr = o; }
+    else {
+      const mm = /[A-Za-z_$][\w$]*$/.exec(masked.slice(Math.max(0, p - 60), p + 1));
+      if (!mm) return null;
+      hdr = p + 1 - mm[0].length;
+    }
+    kind = 'arrow';
+  } else if (masked[k] === ')') {
+    const o = findOpen(masked, k);
+    if (o < 0) return null;
+    const pre = masked.slice(Math.max(0, o - 80), o);
+    const fm = /function\s*\*?\s*[\w$]*\s*$/.exec(pre);
+    if (fm) { hdr = o - pre.length + fm.index; kind = 'function'; }
+    else {
+      const nm = /([A-Za-z_$][\w$]*)\s*$/.exec(pre);
+      if (!nm || /^(?:if|for|while|switch|catch|with|function|return)$/.test(nm[1])) return null;
+      hdr = o - pre.length + nm.index; kind = 'method';
+      if (nm[1] === 'constructor' || /(?:^|[^\w$])(?:get|set)\s+$/.test(pre.slice(0, nm.index))) noAsync = true;
+    }
+  } else return null;
+  const am = /(?:^|[^\w$])async\s*$/.exec(masked.slice(Math.max(0, hdr - 12), hdr));
+  let at = hdr;
+  if (kind === 'method' && masked[hdr - 1] === '*') at = hdr - 1;
+  return { hdr, at, async: !!am, kind, noAsync };
+}
+
+function stageAsync(text, log) {
+  const { kinds } = classify(text);
+  const masked = maskText(text, kinds);
+  if (!/\bawait\b/.test(masked)) return text;
+  const funcs = [], stack = [];
+  for (let i = 0; i < masked.length; i++) {
+    const c = masked[i];
+    if (c === '{') stack.push({ i, fn: describeFn(masked, i) });
+    else if (c === '}') { const o = stack.pop(); if (o && o.fn) funcs.push({ open: o.i, close: i, ...o.fn }); }
+  }
+  const toFix = new Map();
+  for (const m of masked.matchAll(/(?<![\w$.])await(?![\w$])/g)) {
+    const nx = /^\s*(.)/.exec(masked.slice(m.index + 5, m.index + 40));
+    if (!nx || '=,;)]:.}'.includes(nx[1])) continue;
+    let best = null;
+    for (const f of funcs) if (f.open < m.index && m.index < f.close && (!best || f.close - f.open < best.close - best.open)) best = f;
+    if (!best || best.async || toFix.has(best.at)) continue;
+    toFix.set(best.at, best);
+    if (best.noAsync) {
+      log.push({ cat: 'async', type: 'warn', line: lineAt(text, m.index), msg: '`await` is used inside a getter, setter or constructor, which can never be async. Move the `await` into a separate async method.' });
+      toFix.set(best.at, null);
+    }
+  }
+  const edits = [];
+  for (const [pos, f] of toFix) {
+    if (!f) continue;
+    edits.push({ pos, text: 'async ' });
+    log.push({ cat: 'async', type: 'fix', line: lineAt(text, pos), msg: 'Made this ' + (f.kind === 'arrow' ? 'arrow function' : f.kind) + ' `async` because it uses `await`.' });
+  }
+  return applyEdits(text, edits);
+}
+
+/* ---------- Stage 12: let/const declared twice in the same scope ---------- */
+function stageDuplicates(text, log) {
+  const { kinds } = classify(text);
+  const masked = maskText(text, kinds);
+  const scopes = [new Set()];
+  let paren = 0;
+  const edits = [];
+  const re = /[{}()]|\b(const|let)\s+([A-Za-z_$][\w$]*)(?=\s*(=(?!=)|;|,|\n|$))/g;
+  let m;
+  while ((m = re.exec(masked))) {
+    const t = m[0];
+    if (t === '{') scopes.push(new Set());
+    else if (t === '}') { if (scopes.length > 1) scopes.pop(); }
+    else if (t === '(') paren++;
+    else if (t === ')') paren = Math.max(0, paren - 1);
+    else {
+      if (paren > 0) continue;                                   // for-loop header / parameters
+      const name = m[2], top = scopes[scopes.length - 1];
+      if (!top.has(name)) { top.add(name); continue; }
+      const line = lineAt(text, m.index);
+      if (m[3] && m[3][0] === '=') {
+        edits.push({ pos: m.index, del: t.length - name.length });
+        log.push({ cat: 'dupes', type: 'fix', line, msg: '`' + name + '` is declared twice in the same scope; the second `' + m[1] + '` was removed so it becomes a plain assignment.' });
+      } else {
+        log.push({ cat: 'dupes', type: 'warn', line, msg: '`' + name + '` is declared twice in the same scope. Remove one of the declarations.' });
+      }
+    }
+  }
+  return applyEdits(text, edits);
+}
+
+/* ---------- Stage 13: const that is reassigned ---------- */
+function stageConst(text, log) {
+  const { kinds } = classify(text);
+  const masked = maskText(text, kinds);
+  const consts = new Map();
+  for (const m of masked.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
+    if (!consts.has(m[1])) consts.set(m[1], { at: m.index, nameIdx: m.index + m[0].indexOf(m[1], 5) });
+  }
+  if (!consts.size) return text;
+  const reassigned = new Map();
+  const ASSIGN = /(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:=(?![=>])|\+=|-=|\*=|\/=|%=|\*\*=|&&=|\|\|=|\?\?=|<<=|>>=|&=|\|=|\^=|\+\+|--)/g;
+  for (const m of masked.matchAll(ASSIGN)) {
+    const c = consts.get(m[1]);
+    if (!c || m.index === c.nameIdx || m.index < c.at) continue;
+    if (/\b(?:const|let|var)\s+$/.test(masked.slice(Math.max(0, m.index - 8), m.index))) continue;
+    if (!reassigned.has(m[1])) reassigned.set(m[1], m.index);
+  }
+  for (const m of masked.matchAll(/(?:\+\+|--)\s*([A-Za-z_$][\w$]*)/g)) {
+    const c = consts.get(m[1]);
+    if (c && m.index > c.at && !reassigned.has(m[1])) reassigned.set(m[1], m.index);
+  }
+  const edits = [];
+  for (const [name, idx] of reassigned) {
+    const c = consts.get(name);
+    edits.push({ pos: c.at, del: 5, text: 'let' });
+    log.push({ cat: 'const', type: 'fix', line: lineAt(text, c.at), msg: '`' + name + '` is declared with `const` but reassigned on line ' + lineAt(text, idx) + ': changed `const` to `let`.' });
+  }
+  return applyEdits(text, edits);
+}
+
+/* ---------- Stage 14: semicolons ---------- */
+function stageSemicolons(text, log) {
+  const { kinds } = classify(text);
+  const masked = maskText(text, kinds);
+  const noCom = stripComments(text, kinds);
+  const lines = text.split('\n');
+  const nLines = noCom.split('\n');
+  const info = analyzeStructure(masked, noCom);
+  const starts = []; let o = 0;
+  for (const l of lines) { starts.push(o); o += l.length + 1; }
+
+  const CONTINUES_NEXT = /^(?:\.(?!\.\.)|\?|:|&&|\|\||\?\?|\+(?!\+)|\*|%|\||&|\^|<|>|=|,|instanceof\b|in\b)/;
+  const edits = [];
+
+  for (let li = 0; li < lines.length; li++) {
+    const nl = nLines[li];
+    const t = nl.trim();
+    if (!t) continue;                                                   // blank or comment-only
+
+    // skip lines that start/end inside a multi-line template literal or block comment
+    const startNl = li > 0 ? kinds[starts[li] - 1] : K_CODE;
+    const endNlIdx = starts[li] + lines[li].length;
+    const endNl = endNlIdx < text.length ? kinds[endNlIdx] : K_CODE;
+    if (startNl !== K_CODE || endNl !== K_CODE) continue;
+
+    const s = info[li];
+    if (s.top === 'paren' || s.top === 'bracket' || s.top === 'obj') continue;   // inside call args / array / object literal
+    if (s.endsControlClose) continue;                                            // if (...)  while (...)  for (...)
+    const last = t[t.length - 1];
+    if (last === ';') continue;
+    if (/^[@#<]/.test(t)) continue;                                              // decorators, hashbang, JSX
+    if (/^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\b|class\b)/.test(t)) continue;
+    if (/^(?:\}\s*)?(?:else|try|finally|do)$/.test(t)) continue;
+    if (/^(?:case\b.*|default)\s*:$/.test(t)) continue;
+
+    // line ends with an operator / opener -> statement continues
+    const lastIdx = starts[li] + nl.trimEnd().length - 1;
+    const lastKind = kinds[lastIdx];
+    const endsAsOperand = lastKind === K_STR || lastKind === K_RX;
+    if (!endsAsOperand && /[,(\[{:.?+\-*\/%=&|<>^~!]$/.test(t) && !/(\+\+|--)$/.test(t)) continue;
+    if (!endsAsOperand && /(?:^|[^\w$.])(?:return|throw|new|typeof|await|yield|in|of|instanceof|else|do|try|finally|case|default|var|let|const|async|export|import|extends|delete|void)$/.test(t)) continue;
+
+    // next significant line continues this one (method chains, Allman braces, operators)
+    let nj = li + 1;
+    while (nj < lines.length && !nLines[nj].trim()) nj++;
+    if (nj < lines.length) {
+      const nt = nLines[nj].trim();
+      if (nt[0] === '{' || CONTINUES_NEXT.test(nt)) continue;
+    }
+
+    // a line ending in "}" only needs ';' when it is a complete assignment/declaration
+    if (last === '}') {
+      if (!s.balanced) continue;
+      if (!/^(?:export\s+)?(?:const|let|var)\b/.test(t) && !/^[\w$.\[\]'"]+\s*=(?![=>])/.test(t)) continue;
+    }
+
+    edits.push({ pos: starts[li] + nl.trimEnd().length, text: ';' });
+    log.push({ cat: 'semicolons', type: 'fix', line: li + 1, msg: 'Added missing semicolon at the end of the statement.' });
+  }
+  return applyEdits(text, edits);
+}
+
+/* ---------- Stage 15 (optional): tidy formatting ---------- */
+function stageFormat(text, log) {
+  const { kinds } = classify(text);
+  const masked = maskText(text, kinds);
+  const lines = text.split('\n');
+  const mlines = masked.split('\n');
+  const starts = []; let o = 0;
+  for (const l of lines) { starts.push(o); o += l.length + 1; }
+  const IND = '  ';
+  const stack = [];
+  const out = [];
+  let prevLast = '', prevWasCase = false, blankRun = 0, changed = 0;
+  const CONT_LEAD = /^(?:\.(?!\.)|\?|:|&&|\|\||\?\?|\+(?!\+)|-(?!-)|\*|\/|%|<|>|=(?!>)|\|(?!\|)|&(?!&)|\^|instanceof\b|in\b)/;
+
+  for (let li = 0; li < lines.length; li++) {
+    const raw = lines[li];
+    const m = mlines[li];
+    const tm = m.trim();
+    const startKind = li > 0 ? kinds[starts[li] - 1] : K_CODE;
+    const endIdx = starts[li] + raw.length;
+    const endKind = endIdx < text.length ? kinds[endIdx] : K_CODE;
+    const inside = startKind !== K_CODE;
+
+    if (!raw.trim() && !inside && endKind === K_CODE) {
+      if (blankRun >= 2) continue;
+      blankRun++;
+      if (raw !== '') changed++;
+      out.push('');
+      continue;
+    }
+    blankRun = 0;
+
+    // indentation level of this line
+    const mt = m.replace(/^\s+/, '');
+    let lead = 0;
+    while (lead < mt.length && ')]}'.includes(mt[lead])) lead++;
+    const top = stack[stack.length - 1 - lead];
+    let lvl = stack.length - lead > 0 ? top.lvl + 1 : 0;
+    if (top && top.sw && top.inCase && !/^(?:case\b|default\b)/.test(tm)) lvl += 1;
+    if (!lead && tm && !prevWasCase && prevLast) {
+      const prevOp = /[=+\-*\/%&|^<>?:]$/.test(prevLast) && !/(\+\+|--)$/.test(prevLast);
+      if (CONT_LEAD.test(tm) || prevOp) lvl += 1;
+    }
+
+    let line = raw;
+    if (!inside) {
+      line = IND.repeat(lvl) + raw.replace(/^[ \t]+/, '');
+      if (endKind === K_CODE) line = line.replace(/[ \t]+$/, '');
+    } else if (endKind === K_CODE) {
+      line = raw.replace(/[ \t]+$/, '');
+    }
+    if (line !== raw) changed++;
+    out.push(line);
+
+    // track brackets / switch state for the next lines
+    const isCase = /^(?:case\b|default\b)/.test(tm);
+    if (isCase && top && top.sw) top.inCase = true;
+    for (let k = 0; k < m.length; k++) {
+      const c = m[k];
+      if (c === '(' || c === '[' || c === '{') {
+        stack.push({ ch: c, lvl, sw: c === '{' && /\bswitch\s*\(.*\)\s*$/.test(m.slice(0, k)), inCase: false });
+      } else if (c === ')' || c === ']' || c === '}') {
+        const want = OPEN_OF[c];
+        let j = stack.length - 1;
+        while (j >= 0 && stack[j].ch !== want) j--;
+        if (j >= 0) stack.length = j;
+      }
+    }
+    if (tm) {
+      prevLast = tm.slice(-2) === '++' || tm.slice(-2) === '--' ? ';' : tm[tm.length - 1];
+      prevWasCase = isCase;
+      if (/[;{}(\[,]$/.test(tm)) prevLast = tm[tm.length - 1];
+    }
+  }
+  if (changed) log.push({ cat: 'format', type: 'fix', line: 0, msg: 'Tidied the formatting: re-indented the code, trimmed trailing spaces and collapsed extra blank lines (' + changed + ' line' + (changed === 1 ? '' : 's') + ' changed).' });
+  return out.join('\n');
+}
+
+/* ---------- Public entry points ---------- */
+const PIPELINE = [
+  { id: 'strings',    label: 'strings',    fn: stageStrings,     dialects: ['js', 'ts'] },
+  { id: 'lang',       label: 'language habits', fn: stageLang,   dialects: ['js'] },
+  { id: 'keywords',   label: 'keywords',   fn: stageKeywords,    dialects: ['js'] },
+  { id: 'typos',      label: 'typos',      fn: stageTypos,       dialects: ['js', 'ts'] },
+  { id: 'operators',  label: 'operators',  fn: stageOperators,   dialects: ['js'] },
+  { id: 'for',        label: 'for headers', fn: stageFor,        dialects: ['js', 'ts'] },
+  { id: 'conditions', label: 'conditions', fn: stageConditions,  dialects: ['js', 'ts'] },
+  { id: 'brackets',   label: 'brackets',   fn: stageBrackets,    dialects: ['js', 'ts'] },
+  { id: 'commas',     label: 'commas',     fn: stageCommas,      dialects: ['js'], onlyBroken: true },
+  { id: 'names',      label: 'names',      fn: stageFuzzy,       dialects: ['js'] },
+  { id: 'async',      label: 'async',      fn: stageAsync,       dialects: ['js'] },
+  { id: 'dupes',      label: 'duplicates', fn: stageDuplicates,  dialects: ['js'] },
+  { id: 'const',      label: 'const',      fn: stageConst,       dialects: ['js'] },
+  { id: 'semicolons', label: 'semicolons', fn: stageSemicolons,  dialects: ['js', 'ts'] },
+  { id: 'format',     label: 'formatting', fn: stageFormat,      dialects: ['js'], opt: 'format' }
+];
+
+function fixJs(source, opts) {
+  opts = opts || {};
+  const log = [];
+  const ctx = { shift: 0, python: false };
+  let text = String(source).replace(/\r\n?/g, '\n');
+  const originalCheck = checkSyntax(text);
+
+  if (/^\s*(?:def|elif)\b.*:\s*$/m.test(text) || /^\s*(?:from\s+\w+\s+)?import\s+\w+\s*$/m.test(text)) {
+    ctx.python = true;
+    log.push({ cat: 'info', type: 'warn', line: 1, msg: 'This looks like Python. The fixer targets JavaScript, so results may be wrong.' });
+  }
+
+  // stage 0
+  try { text = stageNormalize(text, log, ctx); }
+  catch (e) { log.push({ cat: 'info', type: 'warn', line: 1, msg: 'Clean-up step skipped because of an internal error: ' + e.message }); }
+
+  const dialect = detectDialect(text);
+  const afterNorm = checkSyntax(text);
+  const canVerify = dialect === 'js' && afterNorm.ok !== null;
+  let curOk = afterNorm.ok === true;
+  if (dialect !== 'js') {
+    log.push({ cat: 'info', type: 'warn', line: 1, msg: 'This looks like ' + (dialect === 'ts' ? 'TypeScript' : 'JSX') + '. Only the safe clean-ups were applied and the plain JavaScript parser check was skipped.' });
+  }
+
+  for (const st of PIPELINE) {
+    if (!st.dialects.includes(dialect)) continue;
+    if (st.opt && !opts[st.opt]) continue;
+    if (st.onlyBroken && curOk) continue;
+    const prevText = text, prevLen = log.length;
+    let next;
+    try { next = st.fn(prevText, log, ctx); }
+    catch (e) {
+      log.length = prevLen;
+      log.push({ cat: 'info', type: 'warn', line: 1, msg: 'The "' + st.label + '" step was skipped because of an internal error: ' + e.message });
+      continue;
+    }
+    if (next !== prevText && canVerify && curOk && checkSyntax(next).ok === false) {
+      log.length = prevLen;
+      log.push({ cat: 'info', type: 'warn', line: 1, msg: 'Skipped the "' + st.label + '" step because it would have turned valid code into invalid code.' });
+      continue;
+    }
+    if (ctx.shift) for (let i = prevLen; i < log.length; i++) if (log[i].line > 0) log[i].line += ctx.shift;
+    text = next;
+    if (canVerify && next !== prevText) curOk = checkSyntax(text).ok === true;
+  }
+
+  // final verdict
+  const finalCheck = dialect === 'js' ? checkSyntax(text) : { ok: null };
+  const errLines = [];
+  let message = '', range = null;
+  if (finalCheck.ok === false) {
+    message = finalCheck.message;
+    range = locateError(text);
+    if (range) {
+      for (let l = range.from; l <= range.to; l++) errLines.push(l);
+      log.push({ cat: 'syntax', type: 'warn', line: range.from + ctx.shift,
+        msg: 'The code is still not valid JavaScript. The browser\u2019s parser reports: \u201C' + (range.message || message) + '\u201D somewhere in line' + (range.to > range.from ? 's ' + range.from + '\u2013' + range.to : ' ' + range.from) + ' of the fixed code.' });
+    } else {
+      log.push({ cat: 'syntax', type: 'warn', line: Math.max(1, text.split('\n').length) + ctx.shift,
+        msg: 'The code is still not valid JavaScript. The browser\u2019s parser reports: \u201C' + message + '\u201D.' });
+    }
+  }
+  log.sort((a, b) => a.line - b.line);          // stable sort keeps stage order per line
+  return { code: text, log, syntax: { dialect, before: dialect === 'js' ? originalCheck.ok : null, after: finalCheck.ok, message, errLines, range } };
+}
+
+function looksLikeHtml(s) {
+  return /^\s*<(?:!doctype|html|head|body|script|div|style|meta|link|main|section)\b/i.test(s) && /<script\b[^>]*>[\s\S]*?<\/script\s*>/i.test(s);
+}
+
+/** A whole HTML page: fix only the inline <script> blocks and leave everything else alone. */
+function fixHtml(src, opts) {
+  const log = [{ cat: 'info', type: 'warn', line: 1, msg: 'HTML detected: only the contents of inline <script> blocks were checked and fixed.' }];
+  const re = /(<script\b([^>]*)>)([\s\S]*?)(<\/script\s*>)/gi;
+  let out = '', last = 0, blocks = 0, allOk = true, anyUnknown = false, firstMsg = '';
+  const errLines = [];
+  let m;
+  while ((m = re.exec(src))) {
+    const attrs = m[2];
+    if (/\bsrc\s*=/i.test(attrs)) continue;
+    const typeM = /\btype\s*=\s*["']?([^"'\s>]+)/i.exec(attrs);
+    if (typeM && !/^(?:text\/javascript|application\/javascript|module|text\/ecmascript|application\/ecmascript)$/i.test(typeM[1])) continue;
+    const inner = m[3];
+    if (!inner.trim()) continue;
+    const innerStart = m.index + m[1].length;
+    const lineBase = src.slice(0, innerStart).split('\n').length - 1;
+    const r = fixJs(inner, opts);
+    blocks++;
+    r.log.forEach(e => { if (e.line > 0) e.line += lineBase; log.push(e); });
+    r.syntax.errLines.forEach(l => errLines.push(l + lineBase));
+    if (r.syntax.after === false) { allOk = false; if (!firstMsg) firstMsg = r.syntax.message; }
+    if (r.syntax.after === null) anyUnknown = true;
+    out += src.slice(last, innerStart) + r.code;
+    last = innerStart + inner.length;
+  }
+  out += src.slice(last);
+  if (!blocks) log.push({ cat: 'info', type: 'warn', line: 1, msg: 'No inline <script> block with code was found.' });
+  log.sort((a, b) => a.line - b.line);
+  return { code: out, log, syntax: { dialect: 'html', before: null, after: blocks ? (allOk ? (anyUnknown ? null : true) : false) : null, message: firstMsg, errLines, range: null } };
+}
+
+function fixCode(source, opts) {
+  const src = String(source).replace(/\r\n?/g, '\n');
+  return looksLikeHtml(src) ? fixHtml(src, opts) : fixJs(src, opts);
+}
+
+/* =========================================================================
+ *  SYNTAX HIGHLIGHTER  (pure functions, reuses classify())
+ *
+ *  tokenize(text, {errors}) -> array of lines, each a list of {cls, s}
+ *    t-kw  keywords (purple)     t-str strings (green)
+ *    t-fn  functions (blue)      t-err errors (red)
+ *    t-com comments, t-num numbers, t-lit true/false/null, t-rx regex
+ *  With {errors: true}, known typos, print( calls and unterminated strings
+ *  are tokenised as t-err.
+ * ========================================================================= */
+function tokenize(text, opts) {
+  const withErrors = !!(opts && opts.errors);
+  const { kinds, unterminated } = classify(text);
+  const toks = [];
+  const push = (cls, s) => { if (s) toks.push({ cls, s }); };
+  const n = text.length;
+  const WORD = /[A-Za-z_$][\w$]*|\d[\w.]*|\s+|[\s\S]/g;
+  let i = 0;
+
+  while (i < n) {
+    const k = kinds[i];
+    let j = i + 1;
+    while (j < n && kinds[j] === k) j++;
+    const seg = text.slice(i, j);
+
+    if (k === K_COM) push('t-com', seg);
+    else if (k === K_RX) push('t-rx', seg);
+    else if (k === K_STR) {
+      const bad = withErrors && unterminated.some(u => u.start >= i && u.start < j);
+      push(bad ? 't-err' : 't-str', seg);
+    } else {
+      WORD.lastIndex = 0;
+      let m;
+      while ((m = WORD.exec(seg))) {
+        const w = m[0];
+        const abs = i + m.index;
+        if (/^[A-Za-z_$]/.test(w)) {
+          const after = text.slice(abs + w.length, abs + w.length + 40).match(/^[ \t]*(.)/);
+          const callNext = !!after && after[1] === '(';
+          const prevTxt = text.slice(Math.max(0, abs - 12), abs);
+          let cls = '';
+          if (withErrors && Object.prototype.hasOwnProperty.call(TYPO_MAP, w)) cls = 't-err';
+          else if (withErrors && /^(?:print|println|puts|printf|echo)$/.test(w) && callNext && !/\.\s*$/.test(prevTxt)) cls = 't-err';
+          else if (KEYWORDS.has(w)) cls = 't-kw';
+          else if (LITERALS.has(w)) cls = 't-lit';
+          else if (callNext || /\b(?:function|class)\s+$/.test(prevTxt)) cls = 't-fn';
+          push(cls, w);
+        } else if (/^\d/.test(w)) {
+          push('t-num', w);
+        } else {
+          push('', w);
+        }
+      }
+    }
+    i = j;
+  }
+
+  // split tokens into lines
+  const lines = [[]];
+  for (const t of toks) {
+    const parts = t.s.split('\n');
+    parts.forEach((p, idx) => {
+      if (idx > 0) lines.push([]);
+      if (p) lines[lines.length - 1].push({ cls: t.cls, s: p });
+    });
+  }
+  return lines;
+}
+
+/** Lines (1-based) that still contain a syntax problem: stray/unclosed brackets, open strings. */
+function residualIssues(code) {
+  const { kinds, unterminated, openTemplates } = classify(code);
+  const masked = maskText(code, kinds);
+  const bad = new Set();
+  const stack = [];
+  for (let i = 0; i < masked.length; i++) {
+    const ch = masked[i];
+    if (ch === '(' || ch === '[' || ch === '{') stack.push({ ch, i });
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      const top = stack[stack.length - 1];
+      if (top && top.ch === OPEN_OF[ch]) stack.pop();
+      else bad.add(lineAt(code, i));
+    }
+  }
+  stack.forEach(u => bad.add(lineAt(code, u.i)));
+  unterminated.forEach(u => bad.add(lineAt(code, u.start)));
+  openTemplates.forEach(s => bad.add(lineAt(code, s)));
+  return bad;
+}
+
+/** Which lines of `b` are new or different compared to `a` (LCS diff; falls back to index compare for huge inputs). */
+function changedLines(a, b) {
+  const changed = new Set();
+  let s = 0;
+  while (s < a.length && s < b.length && a[s] === b[s]) s++;
+  let ea = a.length, eb = b.length;
+  while (ea > s && eb > s && a[ea - 1] === b[eb - 1]) { ea--; eb--; }
+  const n = ea - s, m = eb - s;
+  if (n === 0) { for (let j = s; j < eb; j++) changed.add(j); return changed; }
+  if (m === 0) return changed;
+  if (n * m > 6e6) { for (let j = s; j < eb; j++) if (a[j] !== b[j]) changed.add(j); return changed; }
+  const W = m + 1;
+  const dp = new Uint32Array((n + 1) * W);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i * W + j] = a[s + i] === b[s + j] ? dp[(i + 1) * W + j + 1] + 1 : Math.max(dp[(i + 1) * W + j], dp[i * W + j + 1]);
+    }
+  }
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[s + i] === b[s + j]) { i++; j++; }
+    else if (dp[(i + 1) * W + j] >= dp[i * W + j + 1]) i++;
+    else { changed.add(s + j); j++; }
+  }
+  while (j < m) { changed.add(s + j); j++; }
+  return changed;
+}
+
+/* =========================================================================
+ *  UI  (only runs in a browser)
+ * ========================================================================= */
+if (typeof document !== 'undefined') {
+  const $ = (id) => document.getElementById(id);
+  const input = $('input'), outCode = $('output-code'), logBox = $('log'), chips = $('chips');
+  const status = $('status'), logCount = $('log-count'), inputMeta = $('input-meta');
+  const btnFix = $('btn-fix'), btnCopy = $('btn-copy'), btnClear = $('btn-clear'), btnExample = $('btn-example');
+  const btnOpen = $('btn-open'), btnOpenInline = $('btn-open-inline'), btnDownload = $('btn-download');
+  const fileInput = $('file-input'), leftPanel = $('left-panel');
+  const fileChip = $('file-chip'), fileChipName = $('file-chip-name'), fileChipSize = $('file-chip-size'), fileChipX = $('file-chip-x');
+  const tabFixed = $('tab-fixed'), tabOriginal = $('tab-original');
+  const modal = $('privacy-modal'), optSave = $('opt-save'), storageInfo = $('storage-info'), privacyMsg = $('privacy-msg');
+  const optFormat = $('opt-format');
+
+  let fixedCode = '';
+  let last = null;               // {src, fixed, log, errLines, syntax}
+  let view = 'fixed';            // 'fixed' | 'original'
+  let currentFileName = '';
+
+  const CATS = {
+    cleanup:    'Clean-up',
+    assign:     'Assignment in condition',
+    brackets:   'Brackets',
+    typos:      'Typos / names',
+    semicolons: 'Semicolons',
+    strings:    'Strings',
+    commas:     'Commas',
+    async:      'async / await',
+    const:      'const / let',
+    dupes:      'Duplicate declarations',
+    format:     'Formatting'
+  };
+
+  const EXAMPLE = [
+    '// Try me: this snippet is full of beginner bugs',
+    'function greet(name {',
+    '  print("Hello, " + name);',
+    '  let x = 10',
+    '  if (x = 5) {',
+    '    console.log("x is five")',
+    '  }',
+    '  const items = [1, 2, 3',
+    '  const total = 0',
+    '  for (let i = 0, i < items.lenght, i++) {',
+    '    total += items[i]',
+    '  }',
+    '  const data = await fetch("/api")',
+    '  retrun x',
+    ''
+  ].join('\n');
+
+  /* ---------- local storage helpers (privacy-aware, never throw) ---------- */
+  const KEY_SAVE = 'csf.saveCode', KEY_CODE = 'csf.code';
+  const LS = {
+    get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } },
+    del(k) { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } },
+    keys() { try { return Object.keys(localStorage).filter(k => k.startsWith('csf.')); } catch (e) { return []; } }
+  };
+  const saveEnabled = () => LS.get(KEY_SAVE) === '1';
+  let saveTimer = null;
+  function persistCode() {
+    if (!saveEnabled()) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => { if (saveEnabled()) LS.set(KEY_CODE, input.value); }, 400);
+  }
+
+  /* ---------- small helpers ---------- */
+  function updateMeta() {
+    const v = input.value;
+    const lines = v ? v.split('\n').length : 0;
+    inputMeta.textContent = lines + ' line' + (lines === 1 ? '' : 's') + ' \u00b7 ' + v.length + ' chars';
+  }
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function fmtSize(b) { return b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : (b / 1048576).toFixed(2) + ' MB'; }
+
+  function notice(msg, kind) {
+    status.classList.remove('hidden'); status.classList.add('flex');
+    const cls = kind === 'error'
+      ? 'rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300'
+      : 'rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-2 text-sm text-slate-300';
+    status.replaceChildren(el('div', cls, msg));
+  }
+
+  /* ---------- code view with syntax highlighting ---------- */
+  function setView(v) {
+    view = v;
+    const on = 'bg-slate-700 text-white', off = 'text-slate-400 hover:text-slate-200';
+    tabFixed.className = 'rounded-md px-3 py-1 text-xs font-semibold uppercase tracking-wider ' + (v === 'fixed' ? on : off);
+    tabOriginal.className = 'rounded-md px-3 py-1 text-xs font-semibold uppercase tracking-wider ' + (v === 'original' ? on : off);
+    tabFixed.setAttribute('aria-selected', String(v === 'fixed'));
+    tabOriginal.setAttribute('aria-selected', String(v === 'original'));
+    renderCode();
+  }
+
+  function renderCode() {
+    outCode.replaceChildren();
+    if (!last) {
+      outCode.appendChild(el('p', 'p-1 text-slate-600', 'The corrected code will appear here.'));
+      return;
+    }
+    const isOrig = view === 'original';
+    const text = isOrig ? last.src : last.fixed;
+    const lines = tokenize(text, { errors: isOrig });
+    const errLines = isOrig ? last.errLines : last.residual;
+
+    const frag = document.createDocumentFragment();
+    lines.forEach((toks, i) => {
+      let cls = 'code-line';
+      if (errLines.has(i + 1)) cls += ' errline';
+      else if (!isOrig && last.changed.has(i)) cls += ' changed';
+      const row = el('div', cls);
+      row.appendChild(el('span', 'gutter', String(i + 1)));
+      const body = el('span', '');
+      if (!toks.length) body.textContent = ' ';
+      toks.forEach(t => body.appendChild(t.cls ? el('span', t.cls, t.s) : document.createTextNode(t.s)));
+      row.appendChild(body);
+      frag.appendChild(row);
+    });
+    outCode.appendChild(frag);
+  }
+
+  function verdictEl(sx) {
+    if (!sx) return null;
+    const base = 'rounded-lg border px-3 py-2 text-sm ';
+    if (sx.dialect === 'jsx' || sx.dialect === 'ts') {
+      return el('div', base + 'border-slate-700 bg-slate-800/60 text-slate-300',
+        'Looks like ' + (sx.dialect === 'ts' ? 'TypeScript' : 'JSX') + ': only safe clean-ups were applied and the JavaScript parser check was skipped.');
+    }
+    if (sx.after === true) {
+      return el('div', base + 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+        sx.before === true ? '\u2714 Already valid JavaScript (verified with the browser\u2019s own parser).'
+                           : '\u2714 Verified: the browser\u2019s JavaScript parser accepts the fixed code.');
+    }
+    if (sx.after === false) {
+      return el('div', base + 'border-red-500/30 bg-red-500/10 text-red-300',
+        '\u2716 Still not valid JavaScript' + (sx.message ? ': ' + sx.message : '.') + ' See the red lines and the diagnostics below.');
+    }
+    return null;
+  }
+
+  function renderLog(log, sx) {
+    logBox.replaceChildren();
+    chips.replaceChildren();
+    status.replaceChildren();
+
+    const fixes = log.filter(l => l.type === 'fix');
+
+    status.classList.remove('hidden'); status.classList.add('flex');
+    const verdict = verdictEl(sx);
+    if (verdict) status.appendChild(verdict);
+
+    if (!log.length) {
+      if (!verdict) status.appendChild(el('div', 'rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300',
+        '\u2714 No issues detected. Nothing needed fixing.'));
+      else status.appendChild(el('div', 'rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-2 text-sm text-slate-300', 'No issues detected. Nothing needed fixing.'));
+      logCount.textContent = '';
+      logBox.appendChild(el('li', 'text-slate-500', 'No bugs were found by the rule set.'));
+      return;
+    }
+
+    if (fixes.length) {
+      status.appendChild(el('div', 'rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200',
+        fixes.length + ' issue' + (fixes.length === 1 ? '' : 's') + ' found and corrected.'));
+    }
+    logCount.textContent = log.length + ' entr' + (log.length === 1 ? 'y' : 'ies');
+
+    // per-category chips
+    const counts = {};
+    fixes.forEach(f => { counts[f.cat] = (counts[f.cat] || 0) + 1; });
+    Object.keys(counts).forEach(cat => {
+      chips.appendChild(el('span', 'rounded-full border border-slate-700 bg-slate-800 px-2.5 py-0.5 text-xs text-slate-300',
+        (CATS[cat] || cat) + ': ' + counts[cat]));
+    });
+
+    log.forEach(entry => {
+      const li = el('li', 'flex gap-3 rounded-lg border px-3 py-2 ' +
+        (entry.type === 'warn' ? 'border-yellow-500/30 bg-yellow-500/5' : 'border-slate-800 bg-slate-950/50'));
+      li.appendChild(el('span', 'mono flex-none rounded bg-slate-800 px-1.5 py-0.5 text-xs ' +
+        (entry.type === 'warn' ? 'text-yellow-300' : 'text-emerald-300'), entry.line > 0 ? 'Line ' + entry.line : 'All'));
+      li.appendChild(el('span', 'text-slate-300', (entry.type === 'warn' ? 'Warning: ' : '') + entry.msg));
+      logBox.appendChild(li);
+    });
+  }
+
+  function run() {
+    const src = input.value;
+    if (!src.trim()) {
+      notice('Paste some code on the left first, or open a file.');
+      return;
+    }
+    let result;
+    try { result = fixCode(src, { format: optFormat.checked }); }
+    catch (e) { notice('Sorry, the fixer crashed on this input: ' + e.message, 'error'); return; }
+    fixedCode = result.code;
+    const norm = src.replace(/\r\n?/g, '\n');
+    const sx = result.syntax || {};
+    const residual = new Set(sx.dialect === 'js' ? residualIssues(fixedCode) : []);
+    (sx.errLines || []).forEach(l => residual.add(l));
+    last = {
+      src: norm,
+      fixed: fixedCode,
+      log: result.log,
+      syntax: sx,
+      errLines: new Set(result.log.filter(l => l.line > 0).map(l => l.line)),
+      residual,
+      changed: changedLines(norm.split('\n'), fixedCode.split('\n'))
+    };
+    renderCode();
+    renderLog(result.log, sx);
+    btnCopy.disabled = false;
+    btnDownload.disabled = false;
+  }
+
+  function clearAll() {
+    input.value = ''; fixedCode = ''; last = null;
+    currentFileName = ''; showChip(null);
+    renderCode();
+    logBox.replaceChildren(el('li', 'text-slate-600', 'Reported bugs and the fixes applied to them will be listed here.'));
+    chips.replaceChildren(); status.replaceChildren(); status.classList.add('hidden'); status.classList.remove('flex');
+    logCount.textContent = ''; btnCopy.disabled = true; btnDownload.disabled = true;
+    if (saveEnabled()) LS.del(KEY_CODE);
+    updateMeta(); input.focus();
+  }
+
+  async function copyFixed() {
+    if (!fixedCode) return;
+    try {
+      await navigator.clipboard.writeText(fixedCode);
+    } catch (e) {                                   // fallback for non-secure contexts
+      const ta = document.createElement('textarea');
+      ta.value = fixedCode; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch (_) { /* ignore */ }
+      document.body.removeChild(ta);
+    }
+    const old = btnCopy.textContent;
+    btnCopy.textContent = 'Copied \u2714';
+    setTimeout(() => { btnCopy.textContent = old; }, 1500);
+  }
+
+  /* ---------- file upload: open, drag & drop, download ---------- */
+  const MAX_BYTES = 2 * 1024 * 1024;
+  const OK_EXT = /\.(?:js|mjs|cjs|jsx|ts|tsx|html|htm|txt|md)$/i;
+
+  function showChip(file) {
+    if (!file) { fileChip.classList.add('hidden'); fileChip.classList.remove('inline-flex'); return; }
+    fileChipName.textContent = file.name;
+    fileChipSize.textContent = fmtSize(file.size);
+    fileChip.classList.remove('hidden'); fileChip.classList.add('inline-flex');
+  }
+
+  async function loadFile(file) {
+    if (!file) return;
+    if (file.size > MAX_BYTES) { notice('That file is too large (' + fmtSize(file.size) + '). The limit is 2 MB.', 'error'); return; }
+    if (!OK_EXT.test(file.name)) { notice('Unsupported file type. Please choose a .js file (.mjs, .cjs, .jsx, .ts, .tsx, .html and .txt also work).', 'error'); return; }
+    let txt;
+    try { txt = await file.text(); }
+    catch (e) { notice('Could not read that file.', 'error'); return; }
+    if (txt.indexOf('\u0000') !== -1) { notice('That looks like a binary file, not source code.', 'error'); return; }
+    currentFileName = file.name;
+    input.value = txt;
+    showChip(file);
+    updateMeta(); persistCode();
+    run();
+  }
+
+  function fixedName() {
+    const n = currentFileName || 'code.js';
+    const m = /^(.*?)(\.[^.]+)?$/.exec(n);
+    return (m[1] || 'code') + '.fixed' + (m[2] || '.js');
+  }
+
+  function downloadFixed() {
+    if (!fixedCode) return;
+    const isHtml = /\.html?$/i.test(currentFileName);
+    const blob = new Blob([fixedCode], { type: (isHtml ? 'text/html' : 'text/javascript') + ';charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fixedName();
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  const openPicker = () => { fileInput.value = ''; fileInput.click(); };
+  btnOpen.addEventListener('click', openPicker);
+  btnOpenInline.addEventListener('click', openPicker);
+  fileInput.addEventListener('change', () => loadFile(fileInput.files && fileInput.files[0]));
+  btnDownload.addEventListener('click', downloadFixed);
+  fileChipX.addEventListener('click', () => { currentFileName = ''; showChip(null); });
+
+  // Drag & drop (the whole left panel is the target; a drop elsewhere must not navigate away)
+  let dragDepth = 0;
+  const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+  window.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+  window.addEventListener('drop', (e) => { if (hasFiles(e)) e.preventDefault(); });
+  leftPanel.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; leftPanel.classList.add('dragging'); });
+  leftPanel.addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) leftPanel.classList.remove('dragging'); });
+  leftPanel.addEventListener('dragover', (e) => { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+  leftPanel.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth = 0; leftPanel.classList.remove('dragging');
+    const files = e.dataTransfer.files;
+    if (files.length > 1) notice('Only one file can be loaded at a time. Loading "' + files[0].name + '".');
+    loadFile(files[0]);
+  });
+
+  /* ---------- privacy modal & settings ---------- */
+  let lastFocus = null;
+  function refreshStorageInfo() {
+    const code = LS.get(KEY_CODE);
+    const bytes = code ? code.length : 0;
+    storageInfo.textContent = bytes ? 'Currently stored on this device: ' + fmtSize(bytes) + ' of code.' : 'Nothing is stored on this device right now.';
+  }
+  function openPrivacy() {
+    lastFocus = document.activeElement;
+    optSave.checked = saveEnabled();
+    privacyMsg.classList.add('hidden');
+    refreshStorageInfo();
+    modal.classList.remove('hidden'); modal.classList.add('flex');
+    $('privacy-close').focus();
+  }
+  function closePrivacy() {
+    modal.classList.add('hidden'); modal.classList.remove('flex');
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+  function privacyNote(msg) {
+    privacyMsg.textContent = msg; privacyMsg.classList.remove('hidden');
+  }
+
+  $('btn-privacy-top').addEventListener('click', openPrivacy);
+  $('btn-privacy-foot').addEventListener('click', openPrivacy);
+  $('privacy-close').addEventListener('click', closePrivacy);
+  modal.addEventListener('mousedown', (e) => { if (e.target === modal) closePrivacy(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modal.classList.contains('hidden')) closePrivacy(); });
+
+  optSave.addEventListener('change', () => {
+    if (optSave.checked) {
+      if (!LS.set(KEY_SAVE, '1')) { optSave.checked = false; privacyNote('Your browser blocked local storage, so nothing can be remembered.'); return; }
+      LS.set(KEY_CODE, input.value);
+      privacyNote('Saved. Your code will be remembered on this device.');
+    } else {
+      LS.del(KEY_SAVE); LS.del(KEY_CODE);
+      privacyNote('Turned off. Stored code was deleted.');
+    }
+    refreshStorageInfo();
+  });
+
+  $('btn-delete-data').addEventListener('click', () => {
+    LS.keys().forEach(k => LS.del(k));
+    optSave.checked = false;
+    refreshStorageInfo();
+    privacyNote('All data stored by this tool was deleted from this browser.');
+  });
+
+  /* ---------- wiring ---------- */
+  btnFix.addEventListener('click', run);
+  btnCopy.addEventListener('click', copyFixed);
+  btnClear.addEventListener('click', clearAll);
+  btnExample.addEventListener('click', () => { currentFileName = ''; showChip(null); input.value = EXAMPLE; updateMeta(); persistCode(); run(); });
+  tabFixed.addEventListener('click', () => setView('fixed'));
+  tabOriginal.addEventListener('click', () => setView('original'));
+  optFormat.addEventListener('change', () => { if (last && input.value.trim()) run(); });
+  input.addEventListener('input', () => { updateMeta(); persistCode(); });
+  input.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+  });
+
+  // restore remembered code (only if the user opted in)
+  if (saveEnabled()) {
+    const saved = LS.get(KEY_CODE);
+    if (saved) input.value = saved;
+  }
+  setView('fixed');
+  updateMeta();
+}
+</script>
+</body>
+</html>
