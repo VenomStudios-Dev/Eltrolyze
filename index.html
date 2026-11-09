@@ -272,8 +272,10 @@
  *   12. dupes       duplicate let / const declarations in one scope
  *   13. const       const that is reassigned or has no value -> let
  *   14. semicolons  missing semicolons
- *   14b. guided     last resort: tries small edits at the failing statement and
- *                   keeps the one the real JavaScript parser accepts
+ *   14b. guided     last resort: tries small edits (swap, insert, delete, keyword) at the
+ *                   failing line and keeps the one the real JavaScript parser accepts
+ *   typeof          typeof x === "strnig"  ->  "string"
+ *   analysis        warnings only: undeclared names, unreachable code, NaN comparisons
  *   15. format      optional re-indentation
  *
  *  The whole pipeline is repeated (up to 3 passes) while the code is still
@@ -436,6 +438,7 @@ function classify(text) {
           j++;
         }
         if (ok) {
+          while (j + 1 < n && /[a-z]/i.test(text[j + 1])) j++;               // flags: /x/gi
           for (let k = i; k <= j; k++) kinds[k] = K_RX;
           lastSig = j; i = j + 1;
           continue;
@@ -675,12 +678,78 @@ function quickOk(code) {
   return false;
 }
 
+const ENDRE = /end of (?:input|script|data|file)|Unexpected end|unexpected EOF|Missing catch or finally/i;
+const hasModuleSyntax = (t) => /(^|\n)[ \t]*(?:import|export)\b/.test(t);
+
+/** Message of a REAL syntax error (null when the code is valid or merely unfinished, i.e. "unexpected end"). */
+function hardError(code) {
+  let msg = '';
+  try { new Function(code); return null; }
+  catch (e) { if (e && e.name === 'EvalError') return null; msg = (e && e.message) || 'Syntax error'; }
+  if (AsyncFunctionCtor) {
+    try { new AsyncFunctionCtor(code); return null; }
+    catch (e) { if (e && e.name === 'EvalError') return null; msg = (e && e.message) || msg; }
+  }
+  return ENDRE.test(msg) ? null : msg;
+}
+
+/**
+ * First line (1-based) whose prefix already contains a real syntax error. Works on every line that can
+ * end a statement (not just those at bracket depth 0). Brackets still open at the end of a prefix are
+ * closed first, because the parser reports unfinished code as a confusing "Unexpected token" error.
+ * Returns {line, message, closers} (closers = what had to be appended to close the prefix) or null.
+ */
+function firstErrLine(code, isMod) {
+  const lines = code.split('\n');
+  const { kinds } = classify(code);
+  const masked = maskText(code, kinds);
+  const mLines = masked.split('\n');
+  const nLines = stripComments(code, kinds).split('\n');
+  const info = analyzeStructure(masked, stripComments(code, kinds));
+  const prep = (c) => isMod ? moduleToScript(c) : c;
+  const starts = []; let o = 0;
+  for (const l of lines) { starts.push(o); o += l.length + 1; }
+  const NEXT_CONT = /^(?:\.(?!\.\.)|\?|:|&&|\|\||\?\?|\+(?!\+)|-(?!-)|\*|%|\||&|\^|<|>|=|,|\{|instanceof\b|in\b|else\b|catch\b|finally\b|while\b)/;
+  const bounds = [], closersAt = [], stack = [];
+  for (let li = 0; li < lines.length; li++) {
+    for (const ch of mLines[li]) {
+      if ('([{'.includes(ch)) stack.push(ch);
+      else if (')]}'.includes(ch) && stack.length && stack[stack.length - 1] === OPEN_OF[ch]) stack.pop();
+    }
+    closersAt[li] = stack.slice().reverse().map(c => CLOSE_OF[c]).join('');
+    const t = nLines[li].trim();
+    if (!mLines[li].trim() || !t) continue;
+    const e = starts[li] + lines[li].length;
+    const kEnd = e < code.length ? kinds[e] : K_CODE;
+    const kStart = li > 0 ? kinds[starts[li] - 1] : K_CODE;
+    if (kEnd !== K_CODE || kStart !== K_CODE) continue;
+    if (info[li] && info[li].endsControlClose) continue;                        // if (...)  while (...)  for (...)
+    const lastKind = kinds[starts[li] + nLines[li].trimEnd().length - 1];
+    const operand = lastKind === K_STR || lastKind === K_RX;
+    if (!operand && /[+\-*\/%=&|<>^~!?:.]$/.test(t) && !/(\+\+|--)$/.test(t) && !/^(?:case\b.*|default)\s*:$/.test(t)) continue;
+    if (!operand && /(?:^|[^\w$.])(?:return|throw|new|typeof|await|yield|in|of|instanceof|else|do|try|finally|case|default|var|let|const|async|export|import|extends|delete|void)$/.test(t)) continue;
+    let nj = li + 1;
+    while (nj < lines.length && !nLines[nj].trim()) nj++;
+    if (nj < lines.length && NEXT_CONT.test(nLines[nj].trim())) continue;
+    bounds.push(li);
+  }
+  if (!bounds.length) return null;
+  const msgAt = (b) => hardError(prep(lines.slice(0, b + 1).join('\n') + '\n' + closersAt[b]));
+  if (!msgAt(bounds[bounds.length - 1])) return null;
+  let lo = 0, hi = bounds.length - 1, found = -1, msg = '';
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const r = msgAt(bounds[mid]);
+    if (r) { found = mid; msg = r; hi = mid - 1; } else lo = mid + 1;
+  }
+  return found < 0 ? null : { line: bounds[found] + 1, message: msg, closers: closersAt[bounds[found]] };
+}
+
 /** Find the lines that contain the first real syntax error (binary search over statement boundaries). */
 function locateError(code) {
   const lines = code.split('\n');
   const { kinds } = classify(code);
   const masked = maskText(code, kinds).split('\n');
-  const ENDRE = /end of (?:input|script|data|file)|Unexpected end|unexpected EOF/i;
   const bounds = [];
   let depth = 0;
   for (let li = 0; li < lines.length; li++) {
@@ -834,6 +903,21 @@ function stageStrings(text, log) {
   const { kinds, unterminated, openTemplates } = classify(text);
   const edits = [];
   for (const u of unterminated) {
+    // a lone quote right after a word, followed only by punctuation: the OPENING quote is missing
+    if (u.start > 0 && /[\w$]/.test(text[u.start - 1]) && /^[\s)\];,}]*$/.test(text.slice(u.start + 1, u.end))) {
+      let q = u.start - 1;
+      while (q >= 0 && !/[(,=\[{:+;\n]/.test(text[q]) && text[q] !== u.quote) q--;
+      let pos = q + 1;
+      while (pos < u.start && /[ \t]/.test(text[pos])) pos++;
+      let clean = pos < u.start && !(q >= 0 && text[q] === u.quote);
+      for (let k = pos; clean && k < u.start; k++) if (kinds[k] !== K_CODE) clean = false;
+      if (clean) {
+        edits.push({ pos, text: u.quote });
+        log.push({ cat: 'strings', type: 'fix', line: lineAt(text, u.start),
+          msg: 'Added the missing opening quote ' + u.quote + ' before `' + clip(text.slice(pos, u.start).trim()) + '`.' });
+        continue;
+      }
+    }
     // Put the quote before any trailing  ) ] } ; ,  so  print("hi);  ->  print("hi");
     let pos = u.end;
     while (pos > u.start + 1 && /[)\];,}\s]/.test(text[pos - 1])) pos--;
@@ -1008,6 +1092,7 @@ function stageTypos(text, log) {
   // 4a. Misspelled identifiers (only in real code, never inside strings/comments)
   text = rewrite(text, TYPO_RE, (m, masked, t) => {
     const fix = TYPO_MAP[m[1]];
+    if (/^\s*:(?!:)/.test(t.slice(m.index + m[0].length)) && /[{,]$/.test(masked.slice(0, m.index).trimEnd())) return null;   // an object key
     log.push({ cat: 'typos', type: 'fix', line: lineAt(t, m.index),
       msg: 'Fixed typo `' + m[1] + '` \u2192 `' + fix + '`.' });
     return { text: fix };
@@ -1548,6 +1633,32 @@ function stageDuplicates(text, log) {
   return applyEdits(text, edits);
 }
 
+/** How many times each name is declared (variables, parameters, catch, functions, classes). */
+function declCounts(masked) {
+  const cnt = new Map();
+  const bump = (w) => cnt.set(w, (cnt.get(w) || 0) + 1);
+  const add = (str) => { const w = str.match(/[A-Za-z_$][\w$]*/g); if (w) w.forEach(bump); };
+  for (const m of masked.matchAll(/\b(?:const|let|var|function\s*\*?|class)\s+([A-Za-z_$][\w$]*)/g)) bump(m[1]);
+  for (const m of masked.matchAll(/\b(?:const|let|var)\s*([{\[][^=;]*?[}\]])\s*=/g)) add(m[1]);
+  for (const m of masked.matchAll(/\bcatch\s*\(\s*([^()]*)\)/g)) add(m[1]);
+  for (const m of masked.matchAll(/\bfunction\b\s*\*?\s*[\w$]*\s*\(/g)) {
+    const o = m.index + m[0].length - 1, c = findClose(masked, o);
+    if (c > o) add(masked.slice(o + 1, c));
+  }
+  for (const m of masked.matchAll(/=>/g)) {
+    let p = m.index - 1;
+    while (p >= 0 && /\s/.test(masked[p])) p--;
+    if (masked[p] === ')') { const o = findOpen(masked, p); if (o >= 0) add(masked.slice(o + 1, p)); }
+    else { const mm = /([A-Za-z_$][\w$]*)$/.exec(masked.slice(Math.max(0, p - 40), p + 1)); if (mm) bump(mm[1]); }
+  }
+  for (const m of masked.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    if (/^(?:if|for|while|switch|with|catch|function|return|typeof|await|new)$/.test(m[1])) continue;
+    const o = m.index + m[0].length - 1, c = findClose(masked, o);
+    if (c > o && /^\s*\{/.test(masked.slice(c + 1, c + 40))) add(masked.slice(o + 1, c));
+  }
+  return cnt;
+}
+
 /* ---------- Stage 13: const that is reassigned (or never given a value) ---------- */
 function stageConst(text, log) {
   // 13a. "const x;" is a syntax error: a const needs a value, so it becomes "let x;"
@@ -1558,24 +1669,35 @@ function stageConst(text, log) {
     return { from: m.index, to: m.index + 5, text: 'let' };
   });
 
+  // 13b. a const that is reassigned inside its own block (names declared more than once are skipped:
+  //      they are different variables in different scopes, and guessing would break working code)
   const { kinds } = classify(text);
   const masked = maskText(text, kinds);
+  const counts = declCounts(masked);
+  const pairs = [], st = [];
+  for (let i = 0; i < masked.length; i++) {
+    if (masked[i] === '{') st.push(i);
+    else if (masked[i] === '}' && st.length) pairs.push([st.pop(), i]);
+  }
+  const scopeOf = (idx) => { let best = null; for (const pr of pairs) if (pr[0] < idx && idx < pr[1] && (!best || pr[0] > best[0])) best = pr; return best || [-1, masked.length]; };
   const consts = new Map();
   for (const m of masked.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
-    if (!consts.has(m[1])) consts.set(m[1], { at: m.index, nameIdx: m.index + m[0].indexOf(m[1], 5) });
+    if ((counts.get(m[1]) || 0) > 1) continue;
+    if (!consts.has(m[1])) consts.set(m[1], { at: m.index, nameIdx: m.index + m[0].indexOf(m[1], 5), scope: scopeOf(m.index) });
   }
   if (!consts.size) return text;
+  const inScope = (c, idx) => idx > c.at && idx > c.scope[0] && idx < c.scope[1];
   const reassigned = new Map();
   const ASSIGN = /(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:=(?![=>])|\+=|-=|\*=|\/=|%=|\*\*=|&&=|\|\|=|\?\?=|<<=|>>=|&=|\|=|\^=|\+\+|--)/g;
   for (const m of masked.matchAll(ASSIGN)) {
     const c = consts.get(m[1]);
-    if (!c || m.index === c.nameIdx || m.index < c.at) continue;
+    if (!c || m.index === c.nameIdx || !inScope(c, m.index)) continue;
     if (/\b(?:const|let|var)\s+$/.test(masked.slice(Math.max(0, m.index - 8), m.index))) continue;
     if (!reassigned.has(m[1])) reassigned.set(m[1], m.index);
   }
   for (const m of masked.matchAll(/(?:\+\+|--)\s*([A-Za-z_$][\w$]*)/g)) {
     const c = consts.get(m[1]);
-    if (c && m.index > c.at && !reassigned.has(m[1])) reassigned.set(m[1], m.index);
+    if (c && inScope(c, m.index) && !reassigned.has(m[1])) reassigned.set(m[1], m.index);
   }
   const edits = [];
   for (const [name, idx] of reassigned) {
@@ -1649,23 +1771,27 @@ function stageSemicolons(text, log) {
 }
 
 /* ---------- Stage 14b: parser-guided repair (last resort, verified by the real parser) ---------- */
+const GUIDE_WORDS = ['const', 'let', 'return', 'else', 'function', 'async', 'await', 'new'];
 
 /**
- * Small single-character edits near the failing statement, most plausible kinds first:
- * swaps (`=` -> `:`, `;` <-> `,`), inserted `,` / closers / `;`, then deleting a stray character.
+ * Small single edits near the failing statement, most plausible kinds first:
+ * swaps (`=` -> `:`, `;` <-> `,`), inserted `,` `:` closers `;`, deleting a stray character or word,
+ * then the riskier ones (keyword swaps, inserted openers / quotes).
+ * mode 'p' = accepted when the broken statement now parses; mode 'f' = only when the WHOLE code parses.
  */
 function guidedCandidates(code, from, to) {
   const { kinds } = classify(code);
   const lines = code.split('\n');
   const starts = []; let o = 0;
   for (const l of lines) { starts.push(o); o += l.length + 1; }
-  const g = { swap: [], comma: [], close: [], semi: [], del: [] };
-  const first = Math.max(from, to - 8);
+  const g = { swap: [], comma: [], colon: [], close: [], semi: [], del: [], word: [], open: [], quote: [] };
+  const first = Math.max(from, to - 5);
   const isW = (c) => /[\w$]/.test(c || '');
   const lone = (p) => { const a = code[p - 1] || '', b = code[p + 1] || ''; return !/[=!<>+\-*\/%&|^]/.test(a) && b !== '=' && b !== '>'; };
 
   for (let ln = to; ln >= first; ln--) {
     const s = starts[ln - 1], e = s + lines[ln - 1].length;
+    const lineTxt = lines[ln - 1];
     for (let p = s; p <= e; p++) {
       const kp = p > 0 ? kinds[p - 1] : K_CODE;
       const kn = p < code.length ? kinds[p] : K_CODE;
@@ -1674,60 +1800,80 @@ function guidedCandidates(code, from, to) {
       if (p > s && p < e && isW(code[p - 1]) && isW(code[p])) continue;           // inside a word
       const spaceL = p > s && /\s/.test(code[p - 1]), spaceR = p === e || /\s/.test(code[p]);
       if (!(spaceL && spaceR) && !(p === s && p < e && /\s/.test(code[p]))) {
-        g.comma.push({ pos: p, del: 0, text: ',', d: 'inserted a missing `,`' });
-        for (const ch of [')', ']', '}']) g.close.push({ pos: p, del: 0, text: ch, d: 'inserted a missing `' + ch + '`' });
-        g.semi.push({ pos: p, del: 0, text: ';', d: 'inserted a missing `;`' });
+        g.comma.push({ pos: p, del: 0, text: ',', d: 'inserted a missing `,`', mode: 'p' });
+        g.colon.push({ pos: p, del: 0, text: ':', d: 'inserted a missing `:`', mode: 'p' });
+        for (const ch of [')', ']', '}']) g.close.push({ pos: p, del: 0, text: ch, d: 'inserted a missing `' + ch + '`', mode: 'p' });
+        g.semi.push({ pos: p, del: 0, text: ';', d: 'inserted a missing `;`', mode: 'p' });
+        for (const ch of ['(', '[', '{']) g.open.push({ pos: p, del: 0, text: ch, d: 'inserted a missing `' + ch + '`', mode: 'f' });
+        for (const q of ['"', "'"]) g.quote.push({ pos: p, del: 0, text: q, d: 'inserted a missing quote `' + q + '`', mode: 'f' });
       }
       if (p < e && kn === K_CODE) {
         const c = code[p];
-        if (c === '=' && lone(p)) g.swap.push({ pos: p, del: 1, text: ':', d: 'changed `=` to `:`' });
-        else if (c === ';') g.swap.push({ pos: p, del: 1, text: ',', d: 'changed `;` to `,`' });
-        else if (c === ',') g.swap.push({ pos: p, del: 1, text: ';', d: 'changed `,` to `;`' });
-        if (',;)]}([{:'.includes(c)) g.del.push({ pos: p, del: 1, text: '', d: 'removed a stray `' + c + '`' });
+        if (c === '=' && lone(p)) g.swap.push({ pos: p, del: 1, text: ':', d: 'changed `=` to `:`', mode: 'p' });
+        else if (c === ';') g.swap.push({ pos: p, del: 1, text: ',', d: 'changed `;` to `,`', mode: 'p' });
+        else if (c === ',') { g.swap.push({ pos: p, del: 1, text: ';', d: 'changed `,` to `;`', mode: 'p' }); g.swap.push({ pos: p, del: 1, text: ':', d: 'changed `,` to `:`', mode: 'p' }); }
+        if (',;)]}([{:'.includes(c)) g.del.push({ pos: p, del: 1, text: '', d: 'removed a stray `' + c + '`', mode: ',;:'.includes(c) ? 'p' : 'f' });
       }
     }
+    const lead = lineTxt.search(/\S/);
+    for (const w of lineTxt.matchAll(/[A-Za-z_$][\w$]*/g)) {
+      const pos = s + w.index;
+      if (kinds[pos] !== K_CODE || (w.index > 0 && /\d/.test(lineTxt[w.index - 1]))) continue;
+      g.word.push({ pos, del: w[0].length, text: '', d: 'removed the stray word `' + w[0] + '`', mode: 'p' });
+      if (w.index === lead) for (const kw of GUIDE_WORDS) if (kw !== w[0]) g.word.push({ pos, del: w[0].length, text: kw, d: 'changed `' + w[0] + '` to `' + kw + '`', mode: 'f' });
+    }
   }
-  return [...g.swap, ...g.comma, ...g.close, ...g.semi, ...g.del];
+  return [...g.swap, ...g.comma, ...g.colon, ...g.close, ...g.semi, ...g.del, ...g.word, ...g.open, ...g.quote];
 }
 
 function stageGuided(text, log) {
-  const t0 = Date.now(), LIMIT = 2500;
-  const isMod = /(^|\n)[ \t]*(?:import|export)\b/.test(text);
-  const ok = (c) => isMod ? checkSyntax(c).ok === true : quickOk(c);
+  const t0 = Date.now(), LIMIT = 4000;
+  const isMod = hasModuleSyntax(text);
+  const prep = (c) => isMod ? moduleToScript(c) : c;
+  const okFull = (c) => isMod ? checkSyntax(c).ok === true : quickOk(c);
   let cur = text;
 
-  for (let iter = 0; iter < 40 && Date.now() - t0 < LIMIT; iter++) {
-    const chk = checkSyntax(cur);
-    if (chk.ok !== false) break;
-    const loc = locateError(cur);
+  for (let iter = 0; iter < 80 && Date.now() - t0 < LIMIT; iter++) {
+    if (okFull(cur)) break;
+    const err = firstErrLine(cur, isMod);
 
-    if (!loc) {                                           // only "unexpected end": something is still open
-      const tail = cur.replace(/\s+$/, '');
-      let hit = null;
-      for (const add of ['}', ')', ']', '}}', '})', '});', ')}', '}}}']) {
-        if (ok(tail + '\n' + add)) { hit = add; break; }
+    if (!err) {                                           // only "unexpected end": something is still open
+      const { kinds } = classify(cur);
+      const masked = maskText(cur, kinds);
+      const st = [];
+      for (const ch of masked) {
+        if ('([{'.includes(ch)) st.push(ch);
+        else if (')]}'.includes(ch) && st.length && st[st.length - 1] === OPEN_OF[ch]) st.pop();
       }
-      if (!hit) break;
-      log.push({ cat: 'guided', type: 'fix', line: cur.split('\n').length,
-        msg: 'Parser-guided repair: added `' + hit + '` at the end of the code because something was still open (a best guess; please review).' });
-      cur = tail + '\n' + hit;
+      const tail = cur.replace(/\s+$/, '');
+      const opts = [st.reverse().map(c => CLOSE_OF[c]).join(''), '}', ')', ']', '}}', '})', '});', ')}', '}}}'].filter(Boolean);
+      const hit = opts.find(add => okFull(tail + '\n' + add));
+      if (hit) {
+        log.push({ cat: 'guided', type: 'fix', line: cur.split('\n').length,
+          msg: 'Parser-guided repair: added `' + hit + '` at the end of the code because something was still open (a best guess; please review).' });
+        cur = tail + '\n' + hit;
+      }
       break;
     }
 
     const lines = cur.split('\n');
-    let prefixEnd = loc.to - 1;
-    for (let i = 0; i < loc.to; i++) prefixEnd += lines[i].length;
-    const cands = guidedCandidates(cur, loc.from, loc.to);
+    let prefixEnd = err.line - 1;
+    for (let i = 0; i < err.line; i++) prefixEnd += lines[i].length;
+    const closers0 = err.closers || '';
+    const cands = guidedCandidates(cur, Math.max(1, err.line - 5), err.line);
     let best = null;
     for (const c of cands) {
       if (Date.now() - t0 > LIMIT) break;
       const cand = cur.slice(0, c.pos) + c.text + cur.slice(c.pos + c.del);
-      if (ok(cand)) { best = { c, cand }; break; }                    // the whole code is valid now
-      if (!best && ok(cand.slice(0, prefixEnd + c.text.length - c.del))) best = { c, cand };   // the broken statement is fixed
+      if (c.mode === 'f') { if (okFull(cand)) { best = { c, cand }; break; } continue; }
+      const cl = (c.del === 0 && c.text.length === 1 && ')]}'.includes(c.text) && closers0[0] === c.text) ? closers0.slice(1) : closers0;
+      if (hardError(prep(cand.slice(0, prefixEnd + c.text.length - c.del) + '\n' + cl))) continue;   // this statement still fails
+      best = { c, cand };                                                                 // error moved on (or code is valid)
+      break;
     }
     if (!best) break;
     log.push({ cat: 'guided', type: 'fix', line: lineAt(cur, best.c.pos),
-      msg: 'Parser-guided repair: ' + best.c.d + ' (the parser reported \u201C' + clip(loc.message || 'syntax error') + '\u201D here; this is a best guess found by testing small edits, please review).' });
+      msg: 'Parser-guided repair: ' + best.c.d + ' (the parser reported \u201C' + clip(err.message || 'syntax error') + '\u201D here; this is a best guess found by testing small edits, please review).' });
     cur = best.cand;
   }
   return cur;
@@ -1811,12 +1957,99 @@ function stageFormat(text, log) {
   return out.join('\n');
 }
 
+/* ---------- typeof comparisons: typeof x === "strnig" ---------- */
+const TYPEOF_VALUES = ['undefined', 'object', 'boolean', 'number', 'bigint', 'string', 'symbol', 'function'];
+function stageTypeof(text, log) {
+  const { kinds } = classify(text);
+  const edits = [];
+  const re = /\btypeof\s*\(?\s*[\w$.\[\]]+\s*\)?\s*[!=]==?\s*(['"`])([A-Za-z]+)\1/g;
+  for (const m of text.matchAll(re)) {
+    if (kinds[m.index] !== K_CODE) continue;
+    const w = m[2];
+    if (TYPEOF_VALUES.includes(w)) continue;
+    const fix = TYPEOF_VALUES.find(v => v === w.toLowerCase()) || TYPEOF_VALUES.find(v => closeWord(w.toLowerCase(), v));
+    if (!fix) continue;
+    edits.push({ pos: m.index + m[0].length - 1 - w.length, del: w.length, text: fix });
+    log.push({ cat: 'typos', type: 'fix', line: lineAt(text, m.index), msg: '`typeof` can only give a fixed set of words: fixed `"' + w + '"` \u2192 `"' + fix + '"`.' });
+  }
+  return applyEdits(text, edits);
+}
+
+/* ---------- code analysis: warnings about likely bugs (never changes the code) ---------- */
+const ANALYSIS_GLOBALS = new Set(('$ _ jQuery React ReactDOM Vue axios moment dayjs d3 THREE gsap Chart L google gtag dataLayer io ' +
+  'Phaser PIXI p5 Alpine htmx require define importScripts self setImmediate clearImmediate getSelection requestIdleCallback ' +
+  'cancelIdleCallback scrollTo scrollBy postMessage onload onerror addEventListener removeEventListener dispatchEvent ' +
+  'chrome browser electron ipcRenderer ipcMain app BrowserWindow Deno Bun uneval WebAssembly Iterator FinalizationRegistry ' +
+  'XRSession gc test it describe expect beforeEach afterEach beforeAll afterAll jest vi').split(' '));
+const ANALYSIS_PATTERN = /^(?:HTML|SVG|CSS|Web|RTC|IDB|DOM|Media|Audio|Canvas|Payment|Speech|Intl|WebGL|XR|Gamepad|Screen|Text|File|Blob|Mouse|Key|Touch|Pointer|Wheel|Drag|Focus|Input|Animation|Transition|Storage|Performance|Resize|Mutation|Intersection|Cache|Service|Shared|Broadcast|Message|Crypto|Idle|Battery|Clipboard)|(?:Event|Error|Element|Observer|Array|Reader|Writer|Stream|Context|Request|Response|Node|List|Map|Rect|Point|Matrix)$/;
+
+function analyzeCode(text, log, shift) {
+  const { kinds } = classify(text);
+  const masked = maskText(text, kinds);
+  const out = [];
+  const warn = (idx, msg) => out.push({ cat: 'analysis', type: 'warn', line: lineAt(text, idx) + shift, msg });
+
+  // 1. names that are used but never declared anywhere in this code
+  const declared = collectDeclared(masked);
+  const known = new Set();
+  for (const m of masked.matchAll(/([A-Za-z_$][\w$]*)\s*:(?!:)/g)) known.add(m[1]);
+  for (const m of masked.matchAll(/\b(?:get|set|static|async)\s+([A-Za-z_$][\w$]*)/g)) known.add(m[1]);
+  for (const m of masked.matchAll(/([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const o = m.index + m[0].length - 1, c = findClose(masked, o);
+    if (c > o && /^\s*\{/.test(masked.slice(c + 1, c + 40))) known.add(m[1]);
+  }
+  const seen = new Set(), undeclared = [];
+  for (const m of masked.matchAll(/[A-Za-z_$][\w$]*/g)) {
+    const w = m[0], i = m.index;
+    if (i > 0 && /[\w$#]/.test(masked[i - 1])) continue;
+    if (seen.has(w)) continue;
+    let p = i - 1;
+    while (p >= 0 && /[ \t]/.test(masked[p])) p--;
+    if (p >= 0 && masked[p] === '.' && masked[p - 1] !== '.') continue;                 // property access
+    if (/\btypeof\s*$/.test(masked.slice(Math.max(0, i - 8), i))) continue;             // guarded: typeof maybeUndefined
+    if (RESERVED.has(w) || declared.has(w) || known.has(w) || GLOBALS.has(w) || ANALYSIS_GLOBALS.has(w) || ANALYSIS_PATTERN.test(w)) continue;
+    if (w.length < 2) continue;
+    seen.add(w);
+    undeclared.push({ w, i });
+  }
+  if (undeclared.length && undeclared.length <= 12) {
+    undeclared.slice(0, 6).forEach(u => warn(u.i, '`' + u.w + '` is used but never declared in this code. It is either a typo or a global that comes from another file or library.'));
+    if (undeclared.length > 6) warn(undeclared[6].i, undeclared.length - 6 + ' more names are used but never declared (probably globals from other files).');
+  }
+
+  // 2. unreachable code right after return / throw / break / continue
+  const L = masked.split('\n');
+  const depthStart = []; let d = 0;
+  for (const l of L) { depthStart.push(d); for (const c of l) { if ('([{'.includes(c)) d++; else if (')]}'.includes(c)) d--; } }
+  const starts = []; let o = 0;
+  for (const l of text.split('\n')) { starts.push(o); o += l.length + 1; }
+  for (let li = 0; li < L.length; li++) {
+    const t = L[li].trim();
+    if (!/^(?:return|throw|break|continue)\b[^{}]*;$/.test(t) || /=>|\bfunction\b/.test(t)) continue;
+    let pj = li - 1; while (pj >= 0 && !L[pj].trim()) pj--;
+    const pt = pj >= 0 ? L[pj].trim() : '';
+    if (/\)$/.test(pt) || /^(?:else|do)\b/.test(pt) || /\belse$/.test(pt)) continue;    // braceless if / else body
+    let nj = li + 1; while (nj < L.length && !L[nj].trim()) nj++;
+    if (nj >= L.length) continue;
+    const nt = L[nj].trim();
+    if (/^(?:[}\])]|case\b|default\b|else\b|catch\b|finally\b|function\b|async\s+function\b|class\b|label\b)/.test(nt)) continue;
+    if (depthStart[nj] !== depthStart[li]) continue;
+    warn(starts[nj], 'Unreachable code: this line can never run because the statement above already ends the block.');
+  }
+
+  // 3. comparing with NaN is always false
+  for (const m of masked.matchAll(/[!=]==?\s*NaN\b|\bNaN\s*[!=]==?/g)) warn(m.index, 'Comparing with `NaN` never works (NaN is not equal to anything, even itself). Use `Number.isNaN(value)`.');
+
+  out.slice(0, 20).forEach(w => log.push(w));
+}
+
 /* ---------- Public entry points ---------- */
 const PIPELINE = [
   { id: 'strings',    label: 'strings',    fn: stageStrings,     dialects: ['js', 'ts'] },
   { id: 'lang',       label: 'language habits', fn: stageLang,   dialects: ['js'] },
   { id: 'keywords',   label: 'keywords',   fn: stageKeywords,    dialects: ['js'] },
   { id: 'typos',      label: 'typos',      fn: stageTypos,       dialects: ['js', 'ts'] },
+  { id: 'typeof',     label: 'typeof checks', fn: stageTypeof,   dialects: ['js', 'ts'] },
   { id: 'operators',  label: 'operators',  fn: stageOperators,   dialects: ['js'] },
   { id: 'for',        label: 'for headers', fn: stageFor,        dialects: ['js', 'ts'] },
   { id: 'conditions', label: 'conditions', fn: stageConditions,  dialects: ['js', 'ts'] },
@@ -1899,7 +2132,7 @@ function fixJs(source, opts) {
   let message = '', range = null;
   if (finalCheck.ok === false) {
     message = finalCheck.message;
-    range = locateError(text);
+    range = locateError(text) || (() => { const e = firstErrLine(text, hasModuleSyntax(text)); return e ? { from: e.line, to: e.line, message: e.message } : null; })();
     if (range) {
       for (let l = range.from; l <= range.to; l++) errLines.push(l);
       log.push({ cat: 'syntax', type: 'warn', line: range.from + ctx.shift,
@@ -1909,6 +2142,7 @@ function fixJs(source, opts) {
         msg: 'The code is still not valid JavaScript. The browser\u2019s parser reports: \u201C' + message + '\u201D.' });
     }
   }
+  if (finalCheck.ok === true) { try { analyzeCode(text, log, ctx.shift); } catch (e) { /* analysis is optional */ } }
   log.sort((a, b) => a.line - b.line);          // stable sort keeps stage order per line
   return { code: text, log, syntax: { dialect, before: dialect === 'js' ? originalCheck.ok : null, after: finalCheck.ok, message, errLines, range } };
 }
