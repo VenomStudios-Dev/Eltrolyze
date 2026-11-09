@@ -258,7 +258,7 @@
  *  Pipeline:
  *    0. normalize   Markdown fences, line-number gutters, smart quotes, invisible
  *                   characters, HTML entities, "# comments"
- *    1. strings     unterminated strings
+ *    1. strings     unterminated strings and block comments
  *    2. lang        Python / Java / C# / PHP habits  ->  JavaScript
  *    3. keywords    misspelled keywords (fuzzy), typed declarations, def/fn
  *    4. typos       known misspellings, console casing, print() -> console.log()
@@ -270,9 +270,14 @@
  *   10. names       fuzzy typo repair of identifiers + built-in properties
  *   11. async       `await` inside a non-async function
  *   12. dupes       duplicate let / const declarations in one scope
- *   13. const       const that is reassigned -> let
+ *   13. const       const that is reassigned or has no value -> let
  *   14. semicolons  missing semicolons
+ *   14b. guided     last resort: tries small edits at the failing statement and
+ *                   keeps the one the real JavaScript parser accepts
  *   15. format      optional re-indentation
+ *
+ *  The whole pipeline is repeated (up to 3 passes) while the code is still
+ *  invalid, because fixing one bug often unlocks the next one.
  *
  *  Safety net: the browser's own JS parser (parse only, never executes) is
  *  asked after every stage. A stage that would turn VALID code into INVALID
@@ -602,6 +607,24 @@ function collectDeclared(masked) {
   }
   for (const m of masked.matchAll(/\bimport\s+([^;\n]*?)\s+from\b/g)) add(m[1]);
   for (const m of masked.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=(?![=>])/g)) set.add(m[1]);
+  /* smarter: parameters with destructuring / defaults / nested brackets, and catch parameters */
+  for (const m of masked.matchAll(/\bcatch\s*\(\s*([^()]*)\)/g)) add(m[1]);
+  for (const m of masked.matchAll(/\bfunction\b\s*\*?\s*[\w$]*\s*\(/g)) {
+    const o = m.index + m[0].length - 1, c = findClose(masked, o);
+    if (c > o) add(masked.slice(o + 1, c));
+  }
+  for (const m of masked.matchAll(/=>/g)) {
+    let p = m.index - 1;
+    while (p >= 0 && /\s/.test(masked[p])) p--;
+    if (masked[p] === ')') { const o = findOpen(masked, p); if (o >= 0) add(masked.slice(o + 1, p)); }
+  }
+  for (const m of masked.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    if (/^(?:if|for|while|switch|with|catch|function|return|typeof|await|new)$/.test(m[1])) continue;
+    const o = m.index + m[0].length - 1, c = findClose(masked, o);
+    if (c > o && /^\s*\{/.test(masked.slice(c + 1, c + 40)) && /(?:^|[\n;{}]\s*|\b(?:static|async|get|set)\s+)$/.test(masked.slice(Math.max(0, m.index - 12), m.index))) {
+      set.add(m[1]); add(masked.slice(o + 1, c));
+    }
+  }
   return set;
 }
 
@@ -642,6 +665,14 @@ function checkSyntax(code) {
     }
   }
   return { ok: false, message: msg };
+}
+
+/** Cheap yes/no parse check (no module conversion); used when many candidates have to be tried. */
+function quickOk(code) {
+  try { new Function(code); return true; }
+  catch (e) { if (e && e.name === 'EvalError') return false; }
+  if (AsyncFunctionCtor) { try { new AsyncFunctionCtor(code); return true; } catch (e) { /* not valid */ } }
+  return false;
 }
 
 /** Find the lines that contain the first real syntax error (binary search over statement boundaries). */
@@ -800,7 +831,7 @@ function stageNormalize(text, log, ctx) {
 
 /* ---------- Stage 1: unterminated strings ---------- */
 function stageStrings(text, log) {
-  const { unterminated, openTemplates } = classify(text);
+  const { kinds, unterminated, openTemplates } = classify(text);
   const edits = [];
   for (const u of unterminated) {
     // Put the quote before any trailing  ) ] } ; ,  so  print("hi);  ->  print("hi");
@@ -813,6 +844,17 @@ function stageStrings(text, log) {
   for (const t of openTemplates) {
     log.push({ cat: 'strings', type: 'warn', line: lineAt(text, t),
       msg: 'Template literal opened with ` is never closed. Please check it manually.' });
+  }
+  // a /* comment that never ends swallows the rest of the file
+  for (let i = 0; i < text.length - 1; i++) {
+    if (kinds[i] === K_COM && text[i] === '/' && text[i + 1] === '*' && (i === 0 || kinds[i - 1] !== K_COM)) {
+      if (text.indexOf('*/', i + 2) === -1) {
+        edits.push({ pos: text.length, text: (text.endsWith('\n') ? '' : '\n') + '*/' });
+        log.push({ cat: 'strings', type: 'fix', line: lineAt(text, i),
+          msg: 'This /* comment is never closed, so everything after it was treated as a comment. Added the missing */ at the end. Move it to where the comment should stop.' });
+      }
+      break;
+    }
   }
   return applyEdits(text, edits);
 }
@@ -935,9 +977,11 @@ const TYPO_MAP = {
   cosnt: 'const', conts: 'const', whlie: 'while', esle: 'else', improt: 'import', swtich: 'switch', brek: 'break',
   // literals
   flase: 'false', ture: 'true', undefinded: 'undefined', undefind: 'undefined', undefiend: 'undefined',
+  fasle: 'false', treu: 'true', undeifned: 'undefined',
   // console / DOM
-  consle: 'console', cosole: 'console', conosle: 'console', consol: 'console',
-  documnet: 'document', docuemnt: 'document', doucment: 'document',
+  consle: 'console', cosole: 'console', conosle: 'console', consol: 'console', consoel: 'console', cnosole: 'console',
+  documnet: 'document', docuemnt: 'document', doucment: 'document', docment: 'document',
+  widnow: 'window', wnidow: 'window',
   getElementByID: 'getElementById', getElementbyId: 'getElementById', getelementbyid: 'getElementById',
   getElementsByClassname: 'getElementsByClassName',
   queryselector: 'querySelector', queryselectorAll: 'querySelectorAll', queryselectorall: 'querySelectorAll',
@@ -948,7 +992,7 @@ const TYPO_MAP = {
   foreach: 'forEach', psuh: 'push', puhs: 'push', forech: 'forEach', stringfy: 'stringify',
   tostring: 'toString', toLowercase: 'toLowerCase', toUppercase: 'toUpperCase',
   parseint: 'parseInt', parsefloat: 'parseFloat', isnan: 'isNaN',
-  settimeout: 'setTimeout', setinterval: 'setInterval'
+  settimeout: 'setTimeout', setinterval: 'setInterval', setTimout: 'setTimeout', setTimeOut: 'setTimeout'
 };
 const TYPO_RE = new RegExp('(?<![\\w$])(' + Object.keys(TYPO_MAP).join('|') + ')(?![\\w$])', 'g');
 
@@ -1504,8 +1548,16 @@ function stageDuplicates(text, log) {
   return applyEdits(text, edits);
 }
 
-/* ---------- Stage 13: const that is reassigned ---------- */
+/* ---------- Stage 13: const that is reassigned (or never given a value) ---------- */
 function stageConst(text, log) {
+  // 13a. "const x;" is a syntax error: a const needs a value, so it becomes "let x;"
+  text = rewrite(text, /\bconst([ \t]+)([A-Za-z_$][\w$]*)(?=[ \t]*(?:;|\n|$))/g, (m, masked, t) => {
+    const after = masked.slice(m.index + m[0].length).replace(/^[;\s]+/, '');
+    if (after[0] === '=' || after[0] === ',') return null;
+    log.push({ cat: 'const', type: 'fix', line: lineAt(t, m.index), msg: '`' + m[2] + '` is declared with `const` but has no value: changed `const` to `let`.' });
+    return { from: m.index, to: m.index + 5, text: 'let' };
+  });
+
   const { kinds } = classify(text);
   const masked = maskText(text, kinds);
   const consts = new Map();
@@ -1594,6 +1646,91 @@ function stageSemicolons(text, log) {
     log.push({ cat: 'semicolons', type: 'fix', line: li + 1, msg: 'Added missing semicolon at the end of the statement.' });
   }
   return applyEdits(text, edits);
+}
+
+/* ---------- Stage 14b: parser-guided repair (last resort, verified by the real parser) ---------- */
+
+/**
+ * Small single-character edits near the failing statement, most plausible kinds first:
+ * swaps (`=` -> `:`, `;` <-> `,`), inserted `,` / closers / `;`, then deleting a stray character.
+ */
+function guidedCandidates(code, from, to) {
+  const { kinds } = classify(code);
+  const lines = code.split('\n');
+  const starts = []; let o = 0;
+  for (const l of lines) { starts.push(o); o += l.length + 1; }
+  const g = { swap: [], comma: [], close: [], semi: [], del: [] };
+  const first = Math.max(from, to - 8);
+  const isW = (c) => /[\w$]/.test(c || '');
+  const lone = (p) => { const a = code[p - 1] || '', b = code[p + 1] || ''; return !/[=!<>+\-*\/%&|^]/.test(a) && b !== '=' && b !== '>'; };
+
+  for (let ln = to; ln >= first; ln--) {
+    const s = starts[ln - 1], e = s + lines[ln - 1].length;
+    for (let p = s; p <= e; p++) {
+      const kp = p > 0 ? kinds[p - 1] : K_CODE;
+      const kn = p < code.length ? kinds[p] : K_CODE;
+      if (kp === K_COM) continue;
+      if (kp === kn && kn !== K_CODE) continue;                                  // inside a string / regex
+      if (p > s && p < e && isW(code[p - 1]) && isW(code[p])) continue;           // inside a word
+      const spaceL = p > s && /\s/.test(code[p - 1]), spaceR = p === e || /\s/.test(code[p]);
+      if (!(spaceL && spaceR) && !(p === s && p < e && /\s/.test(code[p]))) {
+        g.comma.push({ pos: p, del: 0, text: ',', d: 'inserted a missing `,`' });
+        for (const ch of [')', ']', '}']) g.close.push({ pos: p, del: 0, text: ch, d: 'inserted a missing `' + ch + '`' });
+        g.semi.push({ pos: p, del: 0, text: ';', d: 'inserted a missing `;`' });
+      }
+      if (p < e && kn === K_CODE) {
+        const c = code[p];
+        if (c === '=' && lone(p)) g.swap.push({ pos: p, del: 1, text: ':', d: 'changed `=` to `:`' });
+        else if (c === ';') g.swap.push({ pos: p, del: 1, text: ',', d: 'changed `;` to `,`' });
+        else if (c === ',') g.swap.push({ pos: p, del: 1, text: ';', d: 'changed `,` to `;`' });
+        if (',;)]}([{:'.includes(c)) g.del.push({ pos: p, del: 1, text: '', d: 'removed a stray `' + c + '`' });
+      }
+    }
+  }
+  return [...g.swap, ...g.comma, ...g.close, ...g.semi, ...g.del];
+}
+
+function stageGuided(text, log) {
+  const t0 = Date.now(), LIMIT = 2500;
+  const isMod = /(^|\n)[ \t]*(?:import|export)\b/.test(text);
+  const ok = (c) => isMod ? checkSyntax(c).ok === true : quickOk(c);
+  let cur = text;
+
+  for (let iter = 0; iter < 40 && Date.now() - t0 < LIMIT; iter++) {
+    const chk = checkSyntax(cur);
+    if (chk.ok !== false) break;
+    const loc = locateError(cur);
+
+    if (!loc) {                                           // only "unexpected end": something is still open
+      const tail = cur.replace(/\s+$/, '');
+      let hit = null;
+      for (const add of ['}', ')', ']', '}}', '})', '});', ')}', '}}}']) {
+        if (ok(tail + '\n' + add)) { hit = add; break; }
+      }
+      if (!hit) break;
+      log.push({ cat: 'guided', type: 'fix', line: cur.split('\n').length,
+        msg: 'Parser-guided repair: added `' + hit + '` at the end of the code because something was still open (a best guess; please review).' });
+      cur = tail + '\n' + hit;
+      break;
+    }
+
+    const lines = cur.split('\n');
+    let prefixEnd = loc.to - 1;
+    for (let i = 0; i < loc.to; i++) prefixEnd += lines[i].length;
+    const cands = guidedCandidates(cur, loc.from, loc.to);
+    let best = null;
+    for (const c of cands) {
+      if (Date.now() - t0 > LIMIT) break;
+      const cand = cur.slice(0, c.pos) + c.text + cur.slice(c.pos + c.del);
+      if (ok(cand)) { best = { c, cand }; break; }                    // the whole code is valid now
+      if (!best && ok(cand.slice(0, prefixEnd + c.text.length - c.del))) best = { c, cand };   // the broken statement is fixed
+    }
+    if (!best) break;
+    log.push({ cat: 'guided', type: 'fix', line: lineAt(cur, best.c.pos),
+      msg: 'Parser-guided repair: ' + best.c.d + ' (the parser reported \u201C' + clip(loc.message || 'syntax error') + '\u201D here; this is a best guess found by testing small edits, please review).' });
+    cur = best.cand;
+  }
+  return cur;
 }
 
 /* ---------- Stage 15 (optional): tidy formatting ---------- */
@@ -1690,6 +1827,7 @@ const PIPELINE = [
   { id: 'dupes',      label: 'duplicates', fn: stageDuplicates,  dialects: ['js'] },
   { id: 'const',      label: 'const',      fn: stageConst,       dialects: ['js'] },
   { id: 'semicolons', label: 'semicolons', fn: stageSemicolons,  dialects: ['js', 'ts'] },
+  { id: 'guided',     label: 'parser-guided repair', fn: stageGuided, dialects: ['js'], onlyBroken: true },
   { id: 'format',     label: 'formatting', fn: stageFormat,      dialects: ['js'], opt: 'format' }
 ];
 
@@ -1717,26 +1855,42 @@ function fixJs(source, opts) {
     log.push({ cat: 'info', type: 'warn', line: 1, msg: 'This looks like ' + (dialect === 'ts' ? 'TypeScript' : 'JSX') + '. Only the safe clean-ups were applied and the plain JavaScript parser check was skipped.' });
   }
 
-  for (const st of PIPELINE) {
-    if (!st.dialects.includes(dialect)) continue;
-    if (st.opt && !opts[st.opt]) continue;
-    if (st.onlyBroken && curOk) continue;
+  const runStage = (st) => {
+    if (!st.dialects.includes(dialect)) return;
+    if (st.opt && !opts[st.opt]) return;
+    if (st.onlyBroken && curOk) return;
     const prevText = text, prevLen = log.length;
     let next;
     try { next = st.fn(prevText, log, ctx); }
     catch (e) {
       log.length = prevLen;
       log.push({ cat: 'info', type: 'warn', line: 1, msg: 'The "' + st.label + '" step was skipped because of an internal error: ' + e.message });
-      continue;
+      return;
     }
     if (next !== prevText && canVerify && curOk && checkSyntax(next).ok === false) {
       log.length = prevLen;
       log.push({ cat: 'info', type: 'warn', line: 1, msg: 'Skipped the "' + st.label + '" step because it would have turned valid code into invalid code.' });
-      continue;
+      return;
     }
     if (ctx.shift) for (let i = prevLen; i < log.length; i++) if (log[i].line > 0) log[i].line += ctx.shift;
     text = next;
     if (canVerify && next !== prevText) curOk = checkSyntax(text).ok === true;
+  };
+
+  // The whole pipeline is repeated while the code is still invalid: one fix often unlocks the next one.
+  for (let pass = 0; pass < 3; pass++) {
+    const before = text;
+    for (const st of PIPELINE) if (st.id !== 'format') runStage(st);
+    if (curOk || !canVerify || text === before) break;
+  }
+  runStage(PIPELINE.find(s => s.id === 'format'));
+
+  // the repeated passes can report the same warning twice
+  const seenWarn = new Set();
+  for (let i = 0; i < log.length; i++) {
+    if (log[i].type !== 'warn') continue;
+    const k = log[i].line + '|' + log[i].msg;
+    if (seenWarn.has(k)) { log.splice(i, 1); i--; } else seenWarn.add(k);
   }
 
   // final verdict
@@ -1948,6 +2102,7 @@ if (typeof document !== 'undefined') {
     async:      'async / await',
     const:      'const / let',
     dupes:      'Duplicate declarations',
+    guided:     'Parser-guided',
     format:     'Formatting'
   };
 
